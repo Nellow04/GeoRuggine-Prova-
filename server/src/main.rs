@@ -273,17 +273,21 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             if let Some(client) = w_state.clients.get_mut(&user_id) {
                                 // Verifica transizione di stato
                                 if let Some(last_pos) = &client.last_position {
-                                    if last_pos != &coords && client.state != UserState::InMovimento {
-                                        client.state = UserState::InMovimento;
-                                        println!("Utente {} è ora in stato: In Movimento", client.username);
+                                    let dist = crate::analysis::haversine_distance(last_pos, &coords);
+                                    if dist > 0.001 {
+                                        if client.state != UserState::InMovimento {
+                                            client.state = UserState::InMovimento;
+                                            println!("Utente {} è ora in stato: In Movimento", client.username);
+                                        }
+                                        client.last_update_time = Some(timestamp);
                                     }
                                 } else {
                                     client.state = UserState::Fermo; // prima posizione
+                                    client.last_update_time = Some(timestamp);
                                     println!("Utente {} è ora in stato: Fermo", client.username);
                                 }
                                 
                                 client.last_position = Some(coords.clone());
-                                client.last_update_time = Some(timestamp);
                                 client.position_history.push((coords, timestamp));
                             }
                         }

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use shared::{Coordinates, UserState};
+use shared::Coordinates;
 
 pub struct AnalysisResult {
     pub total_distance_km: f64,
@@ -9,7 +9,7 @@ pub struct AnalysisResult {
 }
 
 /// Calcola la distanza in chilometri usando la formula di Haversine
-fn haversine_distance(coord1: &Coordinates, coord2: &Coordinates) -> f64 {
+pub fn haversine_distance(coord1: &Coordinates, coord2: &Coordinates) -> f64 {
     let r = 6371.0; // Raggio della terra in km
     let d_lat = (coord2.latitude - coord1.latitude).to_radians();
     let d_lon = (coord2.longitude - coord1.longitude).to_radians();
@@ -47,8 +47,7 @@ pub fn analyze_movement(
         };
     }
 
-    let mut current_state = UserState::Fermo;
-    let mut last_move_time = filtered_history[0].1;
+
 
     for i in 1..filtered_history.len() {
         let (prev_coord, prev_time) = filtered_history[i - 1];
@@ -57,34 +56,25 @@ pub fn analyze_movement(
         let distance = haversine_distance(prev_coord, curr_coord);
         let time_diff = curr_time.signed_duration_since(*prev_time).num_seconds();
 
-        // Se la posizione cambia, si è mosso
-        if distance > 0.001 { // Soglia minima per considerare movimento
+        // Se la posizione cambia (più di 1 metro)
+        if distance > 0.001 {
             total_distance_km += distance;
-            
-            if current_state == UserState::Fermo {
-                // Eravamo fermi e ci stiamo muovendo
-                current_state = UserState::InMovimento;
-                pause_time_secs += prev_time.signed_duration_since(last_move_time).num_seconds();
-            }
             moving_time_secs += time_diff;
-            last_move_time = *curr_time;
         } else {
-            // Posizione inalterata
-            if current_state == UserState::InMovimento {
-                let diff_from_last_move = curr_time.signed_duration_since(last_move_time).num_seconds();
-                // Dopo 3 minuti (180 sec) passa a Fermo
-                if diff_from_last_move >= 180 {
-                    current_state = UserState::Fermo;
-                    moving_time_secs += 180; // I primi 3 min erano considerati movimento, o pausa?
-                    // Secondo i requisiti il passaggio a fermo si verifica se "per 3 min non cambia"
-                    // Questo significa che da last_move_time è iniziata una pausa.
-                    pause_time_secs += diff_from_last_move; 
-                }
-            } else {
+            // La posizione NON cambia
+            // Se la differenza di tempo è ragionevole (circa 30s del ping GPS, usiamo <= 45s di tolleranza)
+            // significa che l'utente è connesso ma fermo. È una pausa!
+            // Se invece time_diff > 45s, c'è stato un buco di connessione (Disconnesso), quindi NON è una pausa.
+            if time_diff <= 45 {
                 pause_time_secs += time_diff;
             }
         }
     }
+    
+    // Controlliamo il gap finale tra l'ultima posizione e end_time
+    // Se l'utente è rimasto Fermo ma connesso, l'ultimo punto non include il tempo fino a "ora"
+    // Questo lo lasciamo al vivo se fosse necessario, ma poiché il ping avviene ogni 30s, 
+    // l'ultimo punto è sempre molto recente (max 30 sec fa) se l'utente è connesso.
 
     let average_speed_kmh = if moving_time_secs > 0 {
         total_distance_km / (moving_time_secs as f64 / 3600.0)

@@ -104,11 +104,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         let mut lat = 45.0;
         let mut lon = 7.0;
+        let mut pause_counter = 0;
 
         loop {
-            // Random walk
-            lat += rand::thread_rng().gen_range(-0.01..0.01);
-            lon += rand::thread_rng().gen_range(-0.01..0.01);
+            if pause_counter > 0 {
+                pause_counter -= 1;
+                // La posizione rimane immutata, simulando una sosta
+            } else {
+                // 15% di probabilità di fermarsi (sosta casuale)
+                let rng: f64 = rand::thread_rng().gen();
+                if rng < 0.15 {
+                    // Imposta la pausa per 8 cicli (8 * 30s = 4 minuti)
+                    // In questo modo, dopo 3 minuti esatti il server lo segnalerà come Fermo
+                    pause_counter = 8;
+                } else {
+                    // Random walk
+                    lat += rand::thread_rng().gen_range(-0.01..0.01);
+                    lon += rand::thread_rng().gen_range(-0.01..0.01);
+                }
+            }
             
             let coords = Coordinates { latitude: lat, longitude: lon };
             let msg = Message::PositionUpdate {
