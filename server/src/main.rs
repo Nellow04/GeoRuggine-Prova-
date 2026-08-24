@@ -25,15 +25,30 @@ struct ServerState {
 
 type SharedState = Arc<RwLock<ServerState>>;
 
-use sysinfo::{System, SystemExt, CpuExt};
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
+use sysinfo::{System, SystemExt, CpuExt};
+
+fn load_accounts() -> HashMap<String, String> {
+    if let Ok(content) = fs::read_to_string("accounts.json") {
+        if let Ok(accounts) = serde_json::from_str(&content) {
+            return accounts;
+        }
+    }
+    HashMap::new()
+}
+
+fn save_accounts(accounts: &HashMap<String, String>) {
+    if let Ok(content) = serde_json::to_string_pretty(accounts) {
+        let _ = fs::write("accounts.json", content);
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state_data = ServerState {
         clients: HashMap::new(),
-        accounts: HashMap::new(),
+        accounts: load_accounts(),
     };
     let state: SharedState = Arc::new(RwLock::new(state_data));
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
@@ -97,6 +112,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             write_half.write_all(response_json.as_bytes()).await?;
                         } else {
                             w_state.accounts.insert(username.clone(), password);
+                            save_accounts(&w_state.accounts);
                             let response = Message::RegisterResponse {
                                 success: true,
                                 message: "Registrazione completata".to_string(),
@@ -157,11 +173,13 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             if let Some(client) = w_state.clients.get_mut(&user_id) {
                                 // Verifica transizione di stato
                                 if let Some(last_pos) = &client.last_position {
-                                    if last_pos != &coords {
+                                    if last_pos != &coords && client.state != UserState::InMovimento {
                                         client.state = UserState::InMovimento;
+                                        println!("Utente {} è ora in stato: In Movimento", client.username);
                                     }
                                 } else {
                                     client.state = UserState::Fermo; // prima posizione
+                                    println!("Utente {} è ora in stato: Fermo", client.username);
                                 }
                                 
                                 client.last_position = Some(coords.clone());
@@ -191,8 +209,13 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             let r_state = state.read().await;
                             if let Some(client) = r_state.clients.get(&user_id) {
                                 let result = analysis::analyze_movement(&client.position_history, start_time, end_time);
-                                let stats_msg = format!("=== STATISTICHE ({}) ===\nDistanza: {:.2} km\nVelocità Media: {:.2} km/h\nTempo in Movimento: {} sec\nTempo Pause: {} sec\n===================", 
-                                    interval, result.total_distance_km, result.average_speed_kmh, result.moving_time_secs, result.pause_time_secs);
+                                let state_str = match client.state {
+                                    UserState::Fermo => "Fermo",
+                                    UserState::InMovimento => "In Movimento",
+                                    UserState::Disconnected => "Sconnesso",
+                                };
+                                let stats_msg = format!("=== STATISTICHE ({}) ===\nStato Attuale: {}\nDistanza: {:.2} km\nVelocità Media: {:.2} km/h\nTempo in Movimento: {} sec\nTempo Pause: {} sec\n===================", 
+                                    interval, state_str, result.total_distance_km, result.average_speed_kmh, result.moving_time_secs, result.pause_time_secs);
                                 let _ = tx.send(Message::ServerToClientDirect { target_user_id: user_id.clone(), content: stats_msg }).await;
                             }
                         } else if content.starts_with("/msg ") {
