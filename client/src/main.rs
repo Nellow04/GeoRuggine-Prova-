@@ -1,33 +1,68 @@
 use chrono::Utc;
 use rand::Rng;
 use shared::{Coordinates, Message};
-use std::env;
+use std::io::{self, Write};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = env::args().collect();
-    let username = if args.len() > 1 {
-        args[1].clone()
-    } else {
-        format!("Veicolo_{}", rand::thread_rng().gen_range(1000..9999))
-    };
+    println!("=== GeoRuggine ===");
+    println!("1) Login");
+    println!("2) Registrazione");
+    print!("Scelta: ");
+    io::stdout().flush().unwrap();
+    
+    let mut scelta = String::new();
+    io::stdin().read_line(&mut scelta).unwrap();
+    
+    print!("Username: ");
+    io::stdout().flush().unwrap();
+    let mut username = String::new();
+    io::stdin().read_line(&mut username).unwrap();
+    let username = username.trim().to_string();
+
+    print!("Password: ");
+    io::stdout().flush().unwrap();
+    let mut password = String::new();
+    io::stdin().read_line(&mut password).unwrap();
+    let password = password.trim().to_string();
 
     println!("Avvio client come {}", username);
     
-    let mut stream = TcpStream::connect("127.0.0.1:8080").await?;
+    let stream = TcpStream::connect("127.0.0.1:8080").await?;
     println!("Connesso al server.");
 
     // 1. Auth Phase
-    let auth_msg = Message::AuthRequest { username: username.clone() };
-    let json_auth = serde_json::to_string(&auth_msg)? + "\n";
-    stream.write_all(json_auth.as_bytes()).await?;
-
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
+
+    if scelta.trim() == "2" {
+        let reg_msg = Message::RegisterRequest { username: username.clone(), password: password.clone() };
+        let json_reg = serde_json::to_string(&reg_msg)? + "\n";
+        write_half.write_all(json_reg.as_bytes()).await?;
+        
+        let bytes_read = reader.read_line(&mut line).await?;
+        if bytes_read == 0 {
+            eprintln!("Connessione chiusa.");
+            return Ok(());
+        }
+        
+        let reg_resp: Message = serde_json::from_str(&line)?;
+        if let Message::RegisterResponse { success, message } = reg_resp {
+            println!("Server: {}", message);
+            if !success { return Ok(()); }
+        } else {
+            return Ok(());
+        }
+        line.clear();
+    }
+
+    let login_msg = Message::LoginRequest { username: username.clone(), password };
+    let json_login = serde_json::to_string(&login_msg)? + "\n";
+    write_half.write_all(json_login.as_bytes()).await?;
 
     let bytes_read = reader.read_line(&mut line).await?;
     if bytes_read == 0 {
@@ -37,12 +72,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let auth_resp: Message = serde_json::from_str(&line)?;
     let user_id = match auth_resp {
-        Message::AuthResponse { success, user_id, message } if success => {
+        Message::LoginResponse { success, user_id, message } if success => {
             println!("Server: {}", message);
             user_id.unwrap()
         }
+        Message::LoginResponse { message, .. } => {
+            eprintln!("Errore di login: {}", message);
+            return Ok(());
+        }
         _ => {
-            eprintln!("Autenticazione fallita.");
+            eprintln!("Risposta inattesa.");
             return Ok(());
         }
     };

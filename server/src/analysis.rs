@@ -26,17 +26,19 @@ fn haversine_distance(coord1: &Coordinates, coord2: &Coordinates) -> f64 {
 
 pub fn analyze_movement(
     history: &[(Coordinates, DateTime<Utc>)],
-    _start_time: DateTime<Utc>,
-    _end_time: DateTime<Utc>,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
 ) -> AnalysisResult {
-    // In questo prototipo base non filtriamo per orario (start_time, end_time) ma 
-    // l'estensione iter().filter() verrebbe applicata qui.
+    let filtered_history: Vec<&(Coordinates, DateTime<Utc>)> = history
+        .iter()
+        .filter(|(_, time)| *time >= start_time && *time <= end_time)
+        .collect();
 
     let mut total_distance_km = 0.0;
     let mut moving_time_secs = 0;
     let mut pause_time_secs = 0;
 
-    if history.len() < 2 {
+    if filtered_history.len() < 2 {
         return AnalysisResult {
             total_distance_km: 0.0,
             average_speed_kmh: 0.0,
@@ -46,11 +48,11 @@ pub fn analyze_movement(
     }
 
     let mut current_state = UserState::Fermo;
-    let mut last_move_time = history[0].1;
+    let mut last_move_time = filtered_history[0].1;
 
-    for i in 1..history.len() {
-        let (prev_coord, prev_time) = &history[i - 1];
-        let (curr_coord, curr_time) = &history[i];
+    for i in 1..filtered_history.len() {
+        let (prev_coord, prev_time) = filtered_history[i - 1];
+        let (curr_coord, curr_time) = filtered_history[i];
 
         let distance = haversine_distance(prev_coord, curr_coord);
         let time_diff = curr_time.signed_duration_since(*prev_time).num_seconds();
