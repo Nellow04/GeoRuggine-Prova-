@@ -129,14 +129,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(bytes) = reader.read_line(&mut input).await {
                 if bytes == 0 { break; }
                 let text = input.trim().to_string();
-                if !text.is_empty() {
+                if text.is_empty() { continue; }
+
+                if text.starts_with("/msg ") {
+                    let msg_content = text.strip_prefix("/msg ").unwrap().trim();
+                    let msg = Message::ClientToServerText {
+                        user_id: user_id_cli.clone(),
+                        content: msg_content.to_string(),
+                    };
+                    if tx_cli.send(msg).await.is_err() { break; }
+                } else if text.starts_with("/stats") {
                     let msg = Message::ClientToServerText {
                         user_id: user_id_cli.clone(),
                         content: text,
                     };
-                    if tx_cli.send(msg).await.is_err() {
-                        break;
-                    }
+                    if tx_cli.send(msg).await.is_err() { break; }
+                } else {
+                    println!("Sistema: Usa il comando /msg <testo> per inviare un messaggio al server, oppure /stats");
                 }
             }
         }

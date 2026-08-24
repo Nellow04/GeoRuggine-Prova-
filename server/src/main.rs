@@ -59,6 +59,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         state_monitor_task(state_clone).await;
     });
 
+    let state_for_stdin = state.clone();
+    tokio::spawn(async move {
+        let stdin = tokio::io::stdin();
+        let mut reader = tokio::io::BufReader::new(stdin);
+        let mut input = String::new();
+        use tokio::io::AsyncBufReadExt;
+        
+        loop {
+            input.clear();
+            if let Ok(bytes) = reader.read_line(&mut input).await {
+                if bytes == 0 { break; }
+                let text = input.trim();
+                if text.is_empty() { continue; }
+
+                if text.starts_with("/msg ") {
+                    let parts: Vec<&str> = text.splitn(3, ' ').collect();
+                    if parts.len() == 3 {
+                        let target_name = parts[1];
+                        let msg_content = parts[2];
+                        let r_state = state_for_stdin.read().await;
+                        let direct_msg = Message::ServerToClientDirect { 
+                            target_user_id: "Server".to_string(), 
+                            content: format!("[SERVER PRIVATO]: {}", msg_content) 
+                        };
+                        let mut found = false;
+                        for (_, client) in r_state.clients.iter() {
+                            if client.username == target_name {
+                                let _ = client.sender.send(direct_msg.clone()).await;
+                                found = true;
+                            }
+                        }
+                        if found {
+                            println!("Messaggio privato inviato a {}", target_name);
+                        } else {
+                            println!("Utente {} non trovato", target_name);
+                        }
+                    } else {
+                        println!("Uso corretto: /msg <utente> <messaggio>");
+                    }
+                } else {
+                    let broadcast_msg = Message::ServerToClientBroadcast { 
+                        content: format!("[SERVER BROADCAST]: {}", text) 
+                    };
+                    let r_state = state_for_stdin.read().await;
+                    for (_, client) in r_state.clients.iter() {
+                        let _ = client.sender.send(broadcast_msg.clone()).await;
+                    }
+                    println!("Messaggio broadcast inviato a tutti");
+                }
+            }
+        }
+    });
+
     tokio::spawn(async move {
         cpu_logger_task().await;
     });
@@ -200,9 +253,20 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             
                             let end_time = Utc::now();
                             let start_time = match interval {
-                                "giorno" => end_time - chrono::Duration::days(1),
-                                "settimana" => end_time - chrono::Duration::weeks(1),
-                                "mese" => end_time - chrono::Duration::days(30),
+                                "giorno" => {
+                                    use chrono::{Datelike, TimeZone};
+                                    Utc.with_ymd_and_hms(end_time.year(), end_time.month(), end_time.day(), 0, 0, 0).unwrap()
+                                },
+                                "settimana" => {
+                                    use chrono::{Datelike, TimeZone};
+                                    let days_from_monday = end_time.weekday().num_days_from_monday();
+                                    let monday = end_time - chrono::Duration::days(days_from_monday as i64);
+                                    Utc.with_ymd_and_hms(monday.year(), monday.month(), monday.day(), 0, 0, 0).unwrap()
+                                },
+                                "mese" => {
+                                    use chrono::{Datelike, TimeZone};
+                                    Utc.with_ymd_and_hms(end_time.year(), end_time.month(), 1, 0, 0, 0).unwrap()
+                                },
                                 _ => chrono::DateTime::<Utc>::MIN_UTC, // all
                             };
 
@@ -218,48 +282,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                     interval, state_str, result.total_distance_km, result.average_speed_kmh, result.moving_time_secs, result.pause_time_secs);
                                 let _ = tx.send(Message::ServerToClientDirect { target_user_id: user_id.clone(), content: stats_msg }).await;
                             }
-                        } else if content.starts_with("/msg ") {
-                            let parts: Vec<&str> = content.splitn(3, ' ').collect();
-                            if parts.len() == 3 {
-                                let target_name = parts[1];
-                                let msg_text = parts[2];
-                                
-                                let r_state = state.read().await;
-                                let mut found = false;
-                                for (target_id, target_client) in r_state.clients.iter() {
-                                    if target_client.username == target_name {
-                                        found = true;
-                                        let direct_msg = Message::ServerToClientDirect {
-                                            target_user_id: target_id.clone(),
-                                            content: format!("[Messaggio Privato da {}]: {}", sender_name, msg_text),
-                                        };
-                                        let _ = target_client.sender.send(direct_msg).await;
-                                    }
-                                }
-                                if !found {
-                                    let _ = tx.send(Message::ServerToClientDirect {
-                                        target_user_id: user_id.clone(),
-                                        content: format!("Sistema: Utente '{}' non trovato.", target_name),
-                                    }).await;
-                                }
-                            } else {
-                                let _ = tx.send(Message::ServerToClientDirect {
-                                    target_user_id: user_id.clone(),
-                                    content: "Sistema: Formato non valido. Usa: /msg <nome> <messaggio>".to_string(),
-                                }).await;
-                            }
                         } else {
-                            // Broadcast
-                            let broadcast_msg = Message::ServerToClientBroadcast {
-                                content: format!("[{}] dice: {}", sender_name, content),
-                            };
-                            let r_state = state.read().await;
-                            for (target_id, target_client) in r_state.clients.iter() {
-                                // Opzionale: Non inviare a noi stessi
-                                if target_id != &user_id {
-                                    let _ = target_client.sender.send(broadcast_msg.clone()).await;
-                                }
-                            }
+                            // Messaggio diretto al server
+                            println!("(Messaggio per il Server) da {}: {}", sender_name, content);
                         }
                     },
                     _ => {}
