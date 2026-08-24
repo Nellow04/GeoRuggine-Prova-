@@ -8,81 +8,92 @@ use tokio::net::TcpStream;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== GeoRuggine ===");
-    println!("1) Login");
-    println!("2) Registrazione");
-    print!("Scelta: ");
-    io::stdout().flush().unwrap();
-    
-    let mut scelta = String::new();
-    io::stdin().read_line(&mut scelta).unwrap();
-    
-    print!("Username: ");
-    io::stdout().flush().unwrap();
-    let mut username = String::new();
-    io::stdin().read_line(&mut username).unwrap();
-    let username = username.trim().to_string();
-
-    print!("Password: ");
-    io::stdout().flush().unwrap();
-    let mut password = String::new();
-    io::stdin().read_line(&mut password).unwrap();
-    let password = password.trim().to_string();
-
-    println!("Avvio client come {}", username);
-    
-    let stream = TcpStream::connect("127.0.0.1:8080").await?;
-    println!("Connesso al server.");
-
-    // 1. Auth Phase
-    let (read_half, mut write_half) = stream.into_split();
-    let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
-
-    if scelta.trim() == "2" {
-        let reg_msg = Message::RegisterRequest { username: username.clone(), password: password.clone() };
-        let json_reg = serde_json::to_string(&reg_msg)? + "\n";
-        write_half.write_all(json_reg.as_bytes()).await?;
+    let (user_id, mut write_half, mut reader) = loop {
+        println!("=== GeoRuggine ===");
+        println!("1) Login");
+        println!("2) Registrazione");
+        print!("Scelta: ");
+        io::stdout().flush().unwrap();
         
-        let bytes_read = reader.read_line(&mut line).await?;
+        let mut scelta = String::new();
+        io::stdin().read_line(&mut scelta).unwrap();
+        
+        print!("Username: ");
+        io::stdout().flush().unwrap();
+        let mut username = String::new();
+        io::stdin().read_line(&mut username).unwrap();
+        let username = username.trim().to_string();
+
+        print!("Password: ");
+        io::stdout().flush().unwrap();
+        let mut password = String::new();
+        io::stdin().read_line(&mut password).unwrap();
+        let password = password.trim().to_string();
+
+        println!("Avvio client come {}", username);
+        
+        let stream = match TcpStream::connect("127.0.0.1:8080").await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Impossibile connettersi al server: {}. Riprova.\n", e);
+                continue;
+            }
+        };
+        println!("Connesso al server.");
+
+        // 1. Auth Phase
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+
+        if scelta.trim() == "2" {
+            let reg_msg = Message::RegisterRequest { username: username.clone(), password: password.clone() };
+            let json_reg = serde_json::to_string(&reg_msg).unwrap() + "\n";
+            let _ = write_half.write_all(json_reg.as_bytes()).await;
+            
+            let bytes_read = reader.read_line(&mut line).await.unwrap_or(0);
+            if bytes_read == 0 {
+                eprintln!("Connessione chiusa.\n");
+                continue;
+            }
+            
+            if let Ok(reg_resp) = serde_json::from_str::<Message>(&line) {
+                if let Message::RegisterResponse { success, message } = reg_resp {
+                    println!("Server: {}", message);
+                    if !success { 
+                        println!("Riprova.\n");
+                        continue; 
+                    }
+                }
+            }
+            line.clear();
+        }
+
+        let login_msg = Message::LoginRequest { username, password };
+        let json_login = serde_json::to_string(&login_msg).unwrap() + "\n";
+        let _ = write_half.write_all(json_login.as_bytes()).await;
+
+        let bytes_read = reader.read_line(&mut line).await.unwrap_or(0);
         if bytes_read == 0 {
-            eprintln!("Connessione chiusa.");
-            return Ok(());
+            eprintln!("Connessione chiusa dal server durante l'autenticazione.\n");
+            continue;
         }
-        
-        let reg_resp: Message = serde_json::from_str(&line)?;
-        if let Message::RegisterResponse { success, message } = reg_resp {
-            println!("Server: {}", message);
-            if !success { return Ok(()); }
-        } else {
-            return Ok(());
-        }
-        line.clear();
-    }
 
-    let login_msg = Message::LoginRequest { username: username.clone(), password };
-    let json_login = serde_json::to_string(&login_msg)? + "\n";
-    write_half.write_all(json_login.as_bytes()).await?;
-
-    let bytes_read = reader.read_line(&mut line).await?;
-    if bytes_read == 0 {
-        eprintln!("Connessione chiusa dal server durante l'autenticazione.");
-        return Ok(());
-    }
-
-    let auth_resp: Message = serde_json::from_str(&line)?;
-    let user_id = match auth_resp {
-        Message::LoginResponse { success, user_id, message } if success => {
-            println!("Server: {}", message);
-            user_id.unwrap()
-        }
-        Message::LoginResponse { message, .. } => {
-            eprintln!("Errore di login: {}", message);
-            return Ok(());
-        }
-        _ => {
-            eprintln!("Risposta inattesa.");
-            return Ok(());
+        if let Ok(auth_resp) = serde_json::from_str::<Message>(&line) {
+            match auth_resp {
+                Message::LoginResponse { success, user_id, message } if success => {
+                    println!("Server: {}", message);
+                    break (user_id.unwrap(), write_half, reader);
+                }
+                Message::LoginResponse { message, .. } => {
+                    eprintln!("Errore di login: {}\nRiprova.\n", message);
+                    continue;
+                }
+                _ => {
+                    eprintln!("Risposta inattesa. Riprova.\n");
+                    continue;
+                }
+            }
         }
     };
 
@@ -146,6 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Main loop multiplexing output (GPS+CLI) and Input (Server)
+    let mut line = String::new();
     loop {
         line.clear();
         tokio::select! {
