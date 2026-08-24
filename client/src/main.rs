@@ -138,14 +138,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         content: msg_content.to_string(),
                     };
                     if tx_cli.send(msg).await.is_err() { break; }
-                } else if text.starts_with("/stats") {
-                    let msg = Message::ClientToServerText {
-                        user_id: user_id_cli.clone(),
-                        content: text,
-                    };
-                    if tx_cli.send(msg).await.is_err() { break; }
                 } else {
-                    println!("Sistema: Usa il comando /msg <testo> per inviare un messaggio al server, oppure /stats");
+                    println!("Sistema: Usa il comando /msg <testo> per inviare un messaggio al server");
                 }
             }
         }

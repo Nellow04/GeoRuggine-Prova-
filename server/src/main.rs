@@ -98,6 +98,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         println!("Uso corretto: /msg <utente> <messaggio>");
                     }
+                } else if text.starts_with("/stats") {
+                    let parts: Vec<&str> = text.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        let target_name = parts[1];
+                        let interval = if parts.len() > 2 { parts[2] } else { "all" };
+                        
+                        let end_time = chrono::Utc::now();
+                        let start_time = match interval {
+                            "giorno" => {
+                                use chrono::{Datelike, TimeZone};
+                                chrono::Utc.with_ymd_and_hms(end_time.year(), end_time.month(), end_time.day(), 0, 0, 0).unwrap()
+                            },
+                            "settimana" => {
+                                use chrono::{Datelike, TimeZone};
+                                let days_from_monday = end_time.weekday().num_days_from_monday();
+                                let monday = end_time - chrono::Duration::days(days_from_monday as i64);
+                                chrono::Utc.with_ymd_and_hms(monday.year(), monday.month(), monday.day(), 0, 0, 0).unwrap()
+                            },
+                            "mese" => {
+                                use chrono::{Datelike, TimeZone};
+                                chrono::Utc.with_ymd_and_hms(end_time.year(), end_time.month(), 1, 0, 0, 0).unwrap()
+                            },
+                            _ => chrono::DateTime::<Utc>::MIN_UTC,
+                        };
+
+                        let r_state = state_for_stdin.read().await;
+                        let mut found = false;
+                        for (_, client) in r_state.clients.iter() {
+                            if client.username == target_name {
+                                found = true;
+                                let result = analysis::analyze_movement(&client.position_history, start_time, end_time);
+                                let state_str = match client.state {
+                                    UserState::Fermo => "Fermo",
+                                    UserState::InMovimento => "In Movimento",
+                                    UserState::Disconnected => "Sconnesso",
+                                };
+                                println!("=== STATISTICHE per {} ({}) ===\nStato Attuale: {}\nDistanza: {:.2} km\nVelocità Media: {:.2} km/h\nTempo in Movimento: {} sec\nTempo Pause: {} sec\n===============================", 
+                                    target_name, interval, state_str, result.total_distance_km, result.average_speed_kmh, result.moving_time_secs, result.pause_time_secs);
+                                break;
+                            }
+                        }
+                        if !found {
+                            println!("Utente {} non trovato tra gli utenti correnti.", target_name);
+                        }
+                    } else {
+                        println!("Uso corretto: /stats <utente> [giorno|settimana|mese|all]");
+                    }
                 } else {
                     let broadcast_msg = Message::ServerToClientBroadcast { 
                         content: format!("[SERVER BROADCAST]: {}", text) 
@@ -247,45 +294,8 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             r_state.clients.get(&user_id).map(|c| c.username.clone()).unwrap_or_else(|| user_id.clone())
                         };
 
-                        if content.starts_with("/stats") {
-                            let parts: Vec<&str> = content.split_whitespace().collect();
-                            let interval = if parts.len() > 1 { parts[1] } else { "all" };
-                            
-                            let end_time = Utc::now();
-                            let start_time = match interval {
-                                "giorno" => {
-                                    use chrono::{Datelike, TimeZone};
-                                    Utc.with_ymd_and_hms(end_time.year(), end_time.month(), end_time.day(), 0, 0, 0).unwrap()
-                                },
-                                "settimana" => {
-                                    use chrono::{Datelike, TimeZone};
-                                    let days_from_monday = end_time.weekday().num_days_from_monday();
-                                    let monday = end_time - chrono::Duration::days(days_from_monday as i64);
-                                    Utc.with_ymd_and_hms(monday.year(), monday.month(), monday.day(), 0, 0, 0).unwrap()
-                                },
-                                "mese" => {
-                                    use chrono::{Datelike, TimeZone};
-                                    Utc.with_ymd_and_hms(end_time.year(), end_time.month(), 1, 0, 0, 0).unwrap()
-                                },
-                                _ => chrono::DateTime::<Utc>::MIN_UTC, // all
-                            };
-
-                            let r_state = state.read().await;
-                            if let Some(client) = r_state.clients.get(&user_id) {
-                                let result = analysis::analyze_movement(&client.position_history, start_time, end_time);
-                                let state_str = match client.state {
-                                    UserState::Fermo => "Fermo",
-                                    UserState::InMovimento => "In Movimento",
-                                    UserState::Disconnected => "Sconnesso",
-                                };
-                                let stats_msg = format!("=== STATISTICHE ({}) ===\nStato Attuale: {}\nDistanza: {:.2} km\nVelocità Media: {:.2} km/h\nTempo in Movimento: {} sec\nTempo Pause: {} sec\n===================", 
-                                    interval, state_str, result.total_distance_km, result.average_speed_kmh, result.moving_time_secs, result.pause_time_secs);
-                                let _ = tx.send(Message::ServerToClientDirect { target_user_id: user_id.clone(), content: stats_msg }).await;
-                            }
-                        } else {
-                            // Messaggio diretto al server
-                            println!("(Messaggio per il Server) da {}: {}", sender_name, content);
-                        }
+                        // Messaggio diretto al server
+                        println!("(Messaggio per il Server) da {}: {}", sender_name, content);
                     },
                     _ => {}
                 }
