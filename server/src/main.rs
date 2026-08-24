@@ -13,8 +13,9 @@ struct ClientData {
     username: String,
     state: UserState,
     last_position: Option<Coordinates>,
-    last_update_time: Option<DateTime<Utc>>,
-    position_history: Vec<(Coordinates, DateTime<Utc>)>,
+    last_move_time: Option<DateTime<Utc>>,
+    state_history: Vec<(UserState, DateTime<Utc>)>,
+    distance_history: Vec<(f64, DateTime<Utc>)>,
     sender: mpsc::Sender<Message>,
 }
 
@@ -128,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for (_, client) in r_state.clients.iter() {
                             if client.username == target_name {
                                 found = true;
-                                let result = analysis::analyze_movement(&client.position_history, start_time, end_time);
+                                let result = analysis::analyze_movement(&client.state_history, &client.distance_history, start_time, end_time);
                                 let state_str = match client.state {
                                     UserState::Fermo => "Fermo",
                                     UserState::InMovimento => "In Movimento",
@@ -233,8 +234,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                     username: username.clone(),
                                     state: UserState::Fermo, 
                                     last_position: None,
-                                    last_update_time: None,
-                                    position_history: Vec::new(),
+                                    last_move_time: None,
+                                    state_history: vec![(UserState::Fermo, Utc::now())],
+                                    distance_history: Vec::new(),
                                     sender: tx.clone(),
                                 };
                                 
@@ -271,24 +273,25 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                         if Some(user_id.clone()) == current_user_id {
                             let mut w_state = state.write().await;
                             if let Some(client) = w_state.clients.get_mut(&user_id) {
-                                // Verifica transizione di stato
                                 if let Some(last_pos) = &client.last_position {
                                     let dist = crate::analysis::haversine_distance(last_pos, &coords);
+                                    
+                                    client.distance_history.push((dist, timestamp));
+                                    
                                     if dist > 0.001 {
                                         if client.state != UserState::InMovimento {
                                             client.state = UserState::InMovimento;
+                                            client.state_history.push((UserState::InMovimento, timestamp));
                                             println!("Utente {} è ora in stato: In Movimento", client.username);
                                         }
-                                        client.last_update_time = Some(timestamp);
+                                        client.last_move_time = Some(timestamp);
                                     }
                                 } else {
-                                    client.state = UserState::Fermo; // prima posizione
-                                    client.last_update_time = Some(timestamp);
-                                    println!("Utente {} è ora in stato: Fermo", client.username);
+                                    // prima posizione
+                                    client.last_move_time = Some(timestamp);
                                 }
                                 
                                 client.last_position = Some(coords.clone());
-                                client.position_history.push((coords, timestamp));
                             }
                         }
                     },
@@ -315,6 +318,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
         let mut w_state = state.write().await;
         if let Some(client) = w_state.clients.get_mut(&user_id) {
             client.state = UserState::Disconnected;
+            client.state_history.push((UserState::Disconnected, Utc::now()));
         }
         println!("Utente {} disconnesso", user_id);
     }
@@ -330,10 +334,11 @@ async fn state_monitor_task(state: SharedState) {
         let mut w_state = state.write().await;
         for (_, client) in w_state.clients.iter_mut() {
             if client.state == UserState::InMovimento {
-                if let Some(last_time) = client.last_update_time {
-                    // Se non ci sono aggiornamenti per 3 minuti
+                if let Some(last_time) = client.last_move_time {
+                    // Se non ci sono aggiornamenti di movimento per 3 minuti
                     if now.signed_duration_since(last_time).num_minutes() >= 3 {
                         client.state = UserState::Fermo;
+                        client.state_history.push((UserState::Fermo, now));
                         println!("Utente {} passato a stato Fermo per inattività", client.username);
                     }
                 }

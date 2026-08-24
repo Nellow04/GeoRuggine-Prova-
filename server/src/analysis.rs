@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use shared::Coordinates;
+use shared::{Coordinates, UserState};
 
 pub struct AnalysisResult {
     pub total_distance_km: f64,
@@ -25,56 +25,69 @@ pub fn haversine_distance(coord1: &Coordinates, coord2: &Coordinates) -> f64 {
 }
 
 pub fn analyze_movement(
-    history: &[(Coordinates, DateTime<Utc>)],
+    state_history: &[(UserState, DateTime<Utc>)],
+    distance_history: &[(f64, DateTime<Utc>)],
     start_time: DateTime<Utc>,
     end_time: DateTime<Utc>,
 ) -> AnalysisResult {
-    let filtered_history: Vec<&(Coordinates, DateTime<Utc>)> = history
-        .iter()
-        .filter(|(_, time)| *time >= start_time && *time <= end_time)
-        .collect();
-
+    // 1. Calcola Distanza Totale
     let mut total_distance_km = 0.0;
+    for &(dist, time) in distance_history {
+        if time >= start_time && time <= end_time {
+            total_distance_km += dist;
+        }
+    }
+
+    // 2. Calcola Tempi (Movimento vs Pausa)
     let mut moving_time_secs = 0;
     let mut pause_time_secs = 0;
 
-    if filtered_history.len() < 2 {
+    if state_history.is_empty() {
         return AnalysisResult {
-            total_distance_km: 0.0,
+            total_distance_km,
             average_speed_kmh: 0.0,
-            moving_time_secs: 0,
-            pause_time_secs: 0,
+            moving_time_secs,
+            pause_time_secs,
         };
     }
 
+    let first_event_time = state_history[0].1;
+    let effective_start = std::cmp::max(start_time, first_event_time);
 
+    let mut current_eval_state = UserState::Disconnected;
+    let mut last_eval_time = effective_start;
 
-    for i in 1..filtered_history.len() {
-        let (prev_coord, prev_time) = filtered_history[i - 1];
-        let (curr_coord, curr_time) = filtered_history[i];
-
-        let distance = haversine_distance(prev_coord, curr_coord);
-        let time_diff = curr_time.signed_duration_since(*prev_time).num_seconds();
-
-        // Se la posizione cambia (più di 1 metro)
-        if distance > 0.001 {
-            total_distance_km += distance;
-            moving_time_secs += time_diff;
-        } else {
-            // La posizione NON cambia
-            // Se la differenza di tempo è ragionevole (circa 30s del ping GPS, usiamo <= 45s di tolleranza)
-            // significa che l'utente è connesso ma fermo. È una pausa!
-            // Se invece time_diff > 45s, c'è stato un buco di connessione (Disconnesso), quindi NON è una pausa.
-            if time_diff <= 45 {
-                pause_time_secs += time_diff;
-            }
+    // Troviamo lo stato in cui l'utente si trovava a effective_start
+    for &(ref state, time) in state_history {
+        if time <= effective_start {
+            current_eval_state = state.clone();
         }
     }
-    
-    // Controlliamo il gap finale tra l'ultima posizione e end_time
-    // Se l'utente è rimasto Fermo ma connesso, l'ultimo punto non include il tempo fino a "ora"
-    // Questo lo lasciamo al vivo se fosse necessario, ma poiché il ping avviene ogni 30s, 
-    // l'ultimo punto è sempre molto recente (max 30 sec fa) se l'utente è connesso.
+
+    // Valutiamo i cambi di stato successivi a effective_start, ma entro end_time
+    for &(ref state, time) in state_history {
+        if time > effective_start && time <= end_time {
+            let duration = time.signed_duration_since(last_eval_time).num_seconds();
+            match current_eval_state {
+                UserState::InMovimento => moving_time_secs += duration,
+                UserState::Fermo => pause_time_secs += duration,
+                UserState::Disconnected => {} // Il tempo disconnesso viene ignorato
+            }
+            current_eval_state = state.clone();
+            last_eval_time = time;
+        }
+    }
+
+    // Aggiungiamo l'ultimo spezzone di tempo, da last_eval_time fino a end_time (o fino ad "ora" se end_time è nel futuro)
+    let end_limit = std::cmp::min(end_time, Utc::now());
+    if end_limit > last_eval_time {
+        let final_duration = end_limit.signed_duration_since(last_eval_time).num_seconds();
+        match current_eval_state {
+            UserState::InMovimento => moving_time_secs += final_duration,
+            UserState::Fermo => pause_time_secs += final_duration,
+            UserState::Disconnected => {} 
+        }
+    }
 
     let average_speed_kmh = if moving_time_secs > 0 {
         total_distance_km / (moving_time_secs as f64 / 3600.0)
