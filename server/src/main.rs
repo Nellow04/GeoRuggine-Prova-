@@ -104,6 +104,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if parts.len() >= 2 {
                         let target_name = parts[1];
                         let interval = if parts.len() > 2 { parts[2] } else { "all" };
+
+                        if interval != "giorno" && interval != "settimana" && interval != "mese" && interval != "all" {
+                            println!("Intervallo '{}' non valido. Usa: giorno, settimana, mese, all", interval);
+                            continue;
+                        }
                         
                         let end_time = chrono::Utc::now();
                         let start_time = match interval {
