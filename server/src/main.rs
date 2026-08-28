@@ -28,7 +28,7 @@ type SharedState = Arc<RwLock<ServerState>>;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use sysinfo::{System, SystemExt, CpuExt};
+use sysinfo::{System, SystemExt, ProcessExt, get_current_pid};
 
 fn load_accounts() -> HashMap<String, String> {
     if let Ok(content) = fs::read_to_string("accounts.json") {
@@ -353,23 +353,29 @@ async fn state_monitor_task(state: SharedState) {
 }
 
 async fn cpu_logger_task() {
-    let mut sys = System::new_all();
+    let mut sys = System::new();
+    let pid = get_current_pid().unwrap();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120)); // Ogni 2 minuti
     
-    // Assicuriamoci di fare il primo refresh prima del loop
-    sys.refresh_cpu();
+    // Primo refresh per inizializzare il calcolo per questo processo
+    sys.refresh_process(pid);
 
     loop {
         interval.tick().await;
-        sys.refresh_cpu();
-        let cpu_usage: f32 = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32;
+        sys.refresh_process(pid);
+        
+        let cpu_usage = if let Some(process) = sys.process(pid) {
+            process.cpu_usage()
+        } else {
+            0.0
+        };
         
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
             .open("cpu_log.txt") 
         {
-            let log_line = format!("[{}] CPU Usage: {:.2}%\n", Utc::now(), cpu_usage);
+            let log_line = format!("[{}] Server Process CPU Usage: {:.2}%\n", Utc::now(), cpu_usage);
             let _ = file.write_all(log_line.as_bytes());
         }
     }
