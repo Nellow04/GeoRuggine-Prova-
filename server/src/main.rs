@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let r_state = state_for_stdin.read().await;
                         let direct_msg = Message::ServerToClientDirect { 
                             target_user_id: "Server".to_string(), 
-                            content: format!("[SERVER PRIVATO]: {}", msg_content) 
+                            content: msg_content.to_string() 
                         };
                         let mut found = false;
                         for (_, client) in r_state.clients.iter() {
@@ -101,9 +101,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else if text.starts_with("/stats") {
                     let parts: Vec<&str> = text.split_whitespace().collect();
-                    if parts.len() >= 2 {
+                    if parts.len() == 3 {
                         let target_name = parts[1];
-                        let interval = if parts.len() > 2 { parts[2] } else { "all" };
+                        let interval = parts[2];
 
                         if interval != "giorno" && interval != "settimana" && interval != "mese" && interval != "all" {
                             println!("Intervallo '{}' non valido. Usa: giorno, settimana, mese, all", interval);
@@ -149,11 +149,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("Utente {} non trovato tra gli utenti correnti.", target_name);
                         }
                     } else {
-                        println!("Uso corretto: /stats <utente> [giorno|settimana|mese|all]");
+                        println!("Uso corretto: /stats <utente> <giorno|settimana|mese|all>");
                     }
                 } else {
                     let broadcast_msg = Message::ServerToClientBroadcast { 
-                        content: format!("[SERVER BROADCAST]: {}", text) 
+                        content: text.to_string() 
                     };
                     let r_state = state_for_stdin.read().await;
                     for (_, client) in r_state.clients.iter() {
