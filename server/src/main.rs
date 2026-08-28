@@ -24,6 +24,7 @@ struct ServerState {
     accounts: HashMap<String, String>, // username -> password
 }
 
+//FIXME: rivedi gestione lock
 type SharedState = Arc<RwLock<ServerState>>;
 
 use std::fs::{self, OpenOptions};
@@ -80,6 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let target_name = parts[1];
                         let msg_content = parts[2];
                         let r_state = state_for_stdin.read().await;
+                        //FIXME: cambia nome del campo userid
                         let direct_msg = Message::ServerToClientDirect { 
                             target_user_id: "Server".to_string(), 
                             content: format!("[SERVER PRIVATO]: {}", msg_content) 
@@ -223,6 +225,8 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             println!("Nuovo utente registrato: {}", username);
                         }
                     },
+
+                    //FIXME: password salvate in chiaro
                     Message::LoginRequest { username, password } => {
                         let mut w_state = state.write().await;
                         if let Some(stored_pwd) = w_state.accounts.get(&username) {
@@ -274,7 +278,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             let mut w_state = state.write().await;
                             if let Some(client) = w_state.clients.get_mut(&user_id) {
                                 if let Some(last_pos) = &client.last_position {
-                                    let dist = crate::analysis::haversine_distance(last_pos, &coords);
+                                    let dist = crate::analysis::calculate_distance(last_pos, &coords);
                                     
                                     client.distance_history.push((dist, timestamp));
                                     
@@ -347,6 +351,8 @@ async fn state_monitor_task(state: SharedState) {
     }
 }
 
+
+//FIXME: logga solo la cpu del server: Io userei il PID del processo corrente e sysinfo per leggere process.cpu_usage()
 async fn cpu_logger_task() {
     let mut sys = System::new_all();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120)); // Ogni 2 minuti

@@ -9,7 +9,8 @@ pub struct AnalysisResult {
 }
 
 /// Calcola la distanza in chilometri usando la formula di Haversine
-pub fn haversine_distance(coord1: &Coordinates, coord2: &Coordinates) -> f64 {
+/// TODO: rivedi!
+pub fn calculate_distance(coord1: &Coordinates, coord2: &Coordinates) -> f64 {
     let r = 6371.0; // Raggio della terra in km
     let d_lat = (coord2.latitude - coord1.latitude).to_radians();
     let d_lon = (coord2.longitude - coord1.longitude).to_radians();

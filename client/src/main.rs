@@ -17,6 +17,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         let mut scelta = String::new();
         io::stdin().read_line(&mut scelta).unwrap();
+
+        let scelta = scelta.trim();
+
+        //FIXME: non è gestito il caso di scelta non valida.
+        /* ESEMPIO DI SOLUZIONE MIGLIORE
+        match scelta {
+            "1" => println!("Hai scelto Login"),
+            "2" => println!("Hai scelto Registrazione"),
+            _ => {
+                println!("Scelta non valida.\n");
+                continue;
+            }
+        }
+
+         */
         
         print!("Username: ");
         io::stdout().flush().unwrap();
@@ -42,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Connesso al server.");
 
         // 1. Auth Phase
+        // divide la connessione in due: lettura di quello che arriva dal server e scrittura verso il server
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
@@ -119,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pause_counter = 8;
                 } else {
                     // Random walk
+                    //FIXME: ridurre il raggio?
                     lat += rand::thread_rng().gen_range(-0.01..0.01);
                     lon += rand::thread_rng().gen_range(-0.01..0.01);
                 }
@@ -174,6 +191,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut line = String::new();
     loop {
         line.clear();
+        // aspetta che arrivi qualcosa dal server o un messaggio
+        // TODO: rivedi!!
         tokio::select! {
             // Leggi dal server
             bytes_read = reader.read_line(&mut line) => {
