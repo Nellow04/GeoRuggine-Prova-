@@ -5,6 +5,16 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
+use argon2::{
+    Argon2,
+    PasswordHasher,
+    PasswordVerifier,
+    PasswordHash,
+    password_hash::{
+        SaltString,
+        rand_core::OsRng,
+    },
+};
 
 mod analysis;
 
@@ -214,7 +224,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             let response_json = serde_json::to_string(&response)? + "\n";
                             write_half.write_all(response_json.as_bytes()).await?;
                         } else {
-                            w_state.accounts.insert(username.clone(), password);
+                            //todo: aggiungi cifratura della password
+                            let hashed_password = hash_password(&password)?;
+                            w_state.accounts.insert(username.clone(), hashed_password);
                             save_accounts(&w_state.accounts);
                             let response = Message::RegisterResponse {
                                 success: true,
@@ -230,7 +242,8 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                     Message::LoginRequest { username, password } => {
                         let mut w_state = state.write().await;
                         if let Some(stored_pwd) = w_state.accounts.get(&username) {
-                            if stored_pwd == &password {
+                            //TODO: controlla hash e salt della password
+                            if verify_password(&password,stored_pwd,) {
                                 let user_id = uuid::Uuid::new_v4().to_string();
                                 current_user_id = Some(user_id.clone());
                                 
@@ -374,4 +387,41 @@ async fn cpu_logger_task() {
             let _ = file.write_all(log_line.as_bytes());
         }
     }
+}
+
+fn hash_password(
+    password: &str
+) -> Result<String, Box<dyn std::error::Error>> {
+
+    let salt = SaltString::generate(&mut OsRng);
+
+    let argon2 = Argon2::default();
+
+    let password_hash = argon2
+        .hash_password(
+            password.as_bytes(),
+            &salt,
+        )?
+        .to_string();
+
+    Ok(password_hash)
+}
+
+fn verify_password(
+    password: &str,
+    stored_hash: &str,
+) -> bool {
+
+    let parsed_hash =
+        match PasswordHash::new(stored_hash) {
+            Ok(hash) => hash,
+            Err(_) => return false,
+        };
+
+    Argon2::default()
+        .verify_password(
+            password.as_bytes(),
+            &parsed_hash,
+        )
+        .is_ok()
 }
