@@ -1,3 +1,6 @@
+mod analysis;
+mod auth;
+
 use chrono::{DateTime, Utc};
 use shared::{Coordinates, Message, UserState, UserId};
 use std::collections::HashMap;
@@ -5,18 +8,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
-use argon2::{
-    Argon2,
-    PasswordHasher,
-    PasswordVerifier,
-    PasswordHash,
-    password_hash::{
-        SaltString,
-        rand_core::OsRng,
-    },
-};
+use auth::{load_accounts, hash_password,verify_password,save_accounts};
 
-mod analysis;
 
 #[derive(Debug, Clone)]
 struct ClientData {
@@ -31,7 +24,7 @@ struct ClientData {
 
 struct ServerState {
     clients: HashMap<UserId, ClientData>,
-    accounts: HashMap<String, String>, // username -> password
+    accounts: HashMap<String, String>, // username -> password hash
 }
 
 //FIXME: rivedi gestione lock
@@ -40,21 +33,6 @@ type SharedState = Arc<RwLock<ServerState>>;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use sysinfo::{System, SystemExt, CpuExt};
-
-fn load_accounts() -> HashMap<String, String> {
-    if let Ok(content) = fs::read_to_string("accounts.json") {
-        if let Ok(accounts) = serde_json::from_str(&content) {
-            return accounts;
-        }
-    }
-    HashMap::new()
-}
-
-fn save_accounts(accounts: &HashMap<String, String>) {
-    if let Ok(content) = serde_json::to_string_pretty(accounts) {
-        let _ = fs::write("accounts.json", content);
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -224,10 +202,10 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             let response_json = serde_json::to_string(&response)? + "\n";
                             write_half.write_all(response_json.as_bytes()).await?;
                         } else {
-                            //todo: aggiungi cifratura della password
+                            //fixme: hash password
                             let hashed_password = hash_password(&password)?;
                             w_state.accounts.insert(username.clone(), hashed_password);
-                            save_accounts(&w_state.accounts);
+                            save_accounts(&w_state.accounts)?;
                             let response = Message::RegisterResponse {
                                 success: true,
                                 message: "Registrazione completata".to_string(),
@@ -387,41 +365,4 @@ async fn cpu_logger_task() {
             let _ = file.write_all(log_line.as_bytes());
         }
     }
-}
-
-fn hash_password(
-    password: &str
-) -> Result<String, Box<dyn std::error::Error>> {
-
-    let salt = SaltString::generate(&mut OsRng);
-
-    let argon2 = Argon2::default();
-
-    let password_hash = argon2
-        .hash_password(
-            password.as_bytes(),
-            &salt,
-        )?
-        .to_string();
-
-    Ok(password_hash)
-}
-
-fn verify_password(
-    password: &str,
-    stored_hash: &str,
-) -> bool {
-
-    let parsed_hash =
-        match PasswordHash::new(stored_hash) {
-            Ok(hash) => hash,
-            Err(_) => return false,
-        };
-
-    Argon2::default()
-        .verify_password(
-            password.as_bytes(),
-            &parsed_hash,
-        )
-        .is_ok()
 }
