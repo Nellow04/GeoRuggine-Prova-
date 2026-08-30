@@ -15,189 +15,209 @@ use tokio::io::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-    // ============================================================
-    // 1. AUTENTICAZIONE
-    // ============================================================
-    //
-    // auth::authenticate() gestisce:
-    // - scelta Login / Registrazione
-    // - controllo input
-    // - username e password
-    // - connessione TCP
-    // - registrazione
-    // - login automatico dopo la registrazione
-    //
-    // Se il login riesce restituisce:
-    // - user_id
-    // - metà TCP per scrivere
-    // - metà TCP per leggere, contenuta nel BufReader
-
-    let (user_id, mut write_half, mut reader) =
-        auth::authenticate().await?;
-
-
-    // ============================================================
-    // 2. SIMULAZIONE GPS
-    // ============================================================
-
-    // Copia dello user_id da spostare dentro il task GPS
-    let user_id_clone = user_id.clone();
-
     /*
-     * Canale interno al client.
+     * LOOP DELLE SESSIONI
      *
-     * Il task GPS genera PositionUpdate e li invia tramite tx_gps.
+     * Ogni giro corrisponde a:
      *
-     * Il main riceve questi messaggi tramite rx_gps
-     * e successivamente li invia al server tramite TCP.
+     * login -> sessione -> logout
+     *
+     * Dopo il logout si torna automaticamente
+     * all'inizio e viene mostrato di nuovo
+     * il menu Login / Registrazione.
      */
-    let (tx_gps, mut rx_gps) =
-        tokio::sync::mpsc::channel::<Message>(10);
+    loop {
+
+        // ============================================================
+        // 1. AUTENTICAZIONE
+        // ============================================================
+
+        let (user_id, mut write_half, mut reader) =
+            auth::authenticate().await?;
 
 
-    tokio::spawn(async move {
+        // ============================================================
+        // 2. SIMULAZIONE GPS
+        // ============================================================
 
-        // Coordinate iniziali
-        let mut lat = 45.0;
-        let mut lon = 7.0;
-
-        // Numero di cicli per cui il veicolo deve restare fermo
-        let mut pause_counter = 0;
+        // Copia dello user_id da spostare dentro il task GPS
+        let user_id_clone = user_id.clone();
 
 
-        loop {
+        /*
+         * Canale interno al client.
+         *
+         * Il task GPS genera PositionUpdate
+         * e li manda al main tramite tx_gps.
+         */
+        let (tx_gps, mut rx_gps) =
+            tokio::sync::mpsc::channel::<Message>(10);
 
-            // ----------------------------------------------------
-            // VEICOLO IN PAUSA
-            // ----------------------------------------------------
 
-            if pause_counter > 0 {
+        /*
+         * Conserviamo il JoinHandle.
+         *
+         * In questo modo, al logout,
+         * possiamo fermare il task GPS.
+         */
+        let gps_handle = tokio::spawn(async move {
 
-                pause_counter -= 1;
+            // Coordinate iniziali
+            let mut lat = 45.0;
+            let mut lon = 7.0;
 
-                // Non modifichiamo latitudine e longitudine:
-                // la posizione rimane invariata.
+            // Numero di cicli per cui il veicolo resta fermo
+            let mut pause_counter = 0;
 
+
+            loop {
 
                 // ----------------------------------------------------
-                // VEICOLO NON IN PAUSA
+                // VEICOLO IN PAUSA
                 // ----------------------------------------------------
 
-            } else {
+                if pause_counter > 0 {
 
-                /*
-                 * Generiamo un numero casuale tra 0 e 1.
-                 *
-                 * Se è < 0.15:
-                 *      il veicolo inizia una sosta.
-                 *
-                 * Altrimenti:
-                 *      il veicolo cambia posizione.
-                 */
-                let rng: f64 =
-                    rand::thread_rng().gen();
-
-
-                if rng < 0.15 {
+                    pause_counter -= 1;
 
                     /*
-                     * Impostiamo una pausa.
-                     *
-                     * Ogni ciclo dura 30 secondi.
-                     * 8 cicli corrispondono a circa 4 minuti.
+                     * Non modifichiamo latitudine e longitudine.
+                     * La posizione rimane invariata.
                      */
-                    pause_counter = 8;
 
                 } else {
 
-                    // Random walk
-                    // FIXME: valutare se ridurre il raggio
+                    // ------------------------------------------------
+                    // VEICOLO NON IN PAUSA
+                    // ------------------------------------------------
 
-                    lat += rand::thread_rng()
-                        .gen_range(-0.01..0.01);
+                    let rng: f64 =
+                        rand::thread_rng().gen();
 
-                    lon += rand::thread_rng()
-                        .gen_range(-0.01..0.01);
+
+                    /*
+                     * Se rng < 0.15:
+                     * il veicolo inizia una sosta.
+                     *
+                     * Altrimenti:
+                     * cambia posizione.
+                     */
+                    if rng < 0.15 {
+
+                        /*
+                         * Ogni ciclo dura 30 secondi.
+                         * 8 cicli = circa 4 minuti.
+                         */
+                        pause_counter = 8;
+
+                    } else {
+
+                        // Random walk
+                        //TODO: valutare se ridurre il raggio
+
+                        lat += rand::thread_rng()
+                            .gen_range(-0.01..0.01);
+
+                        lon += rand::thread_rng()
+                            .gen_range(-0.01..0.01);
+                    }
                 }
+
+
+                // Creiamo la nuova posizione
+                let coords = Coordinates {
+                    latitude: lat,
+                    longitude: lon,
+                };
+
+
+                // Creiamo il messaggio da inviare
+                let msg =
+                    Message::PositionUpdate {
+                        user_id:
+                        user_id_clone.clone(),
+
+                        coords,
+
+                        timestamp:
+                        Utc::now(),
+                    };
+
+
+                /*
+                 * Il GPS non scrive direttamente sulla TCP.
+                 *
+                 * Manda il messaggio al main.
+                 */
+                if tx_gps.send(msg).await.is_err() {
+                    break;
+                }
+
+
+                // Una posizione ogni 30 secondi
+                tokio::time::sleep(
+                    Duration::from_secs(30)
+                )
+                    .await;
             }
+        });
 
 
-            // Creiamo la nuova posizione
-            let coords = Coordinates {
-                latitude: lat,
-                longitude: lon,
-            };
+        // ============================================================
+        // 3. INPUT CONSOLE
+        // ============================================================
+
+        // Copia dello user_id per il task console
+        let user_id_cli = user_id.clone();
 
 
-            // Creiamo il messaggio da inviare al server
-            let msg = Message::PositionUpdate {
-                user_id: user_id_clone.clone(),
-                coords,
-                timestamp: Utc::now(),
-            };
+        /*
+         * Secondo channel interno.
+         *
+         * console -> tx_cli -> rx_cli -> main -> server
+         */
+        let (tx_cli, mut rx_cli) =
+            tokio::sync::mpsc::channel::<Message>(10);
 
 
-            /*
-             * Il GPS non scrive direttamente sul TCP.
-             *
-             * Invia invece il messaggio al main tramite
-             * il channel tx_gps -> rx_gps.
-             */
-            if tx_gps.send(msg).await.is_err() {
-                break;
-            }
+        /*
+         * Anche qui conserviamo il JoinHandle
+         * per poter fermare il task a fine sessione.
+         */
+        let cli_handle = tokio::spawn(async move {
+
+            let stdin =
+                tokio::io::stdin();
+
+            let mut reader =
+                BufReader::new(stdin);
+
+            let mut input =
+                String::new();
 
 
-            // Requisito della traccia:
-            // una posizione ogni 30 secondi
-            tokio::time::sleep(
-                Duration::from_secs(30)
-            )
-                .await;
-        }
-    });
+            loop {
+
+                input.clear();
 
 
-    // ============================================================
-    // 3. INPUT CONSOLE PER LA CHAT
-    // ============================================================
+                let bytes =
+                    match reader
+                        .read_line(&mut input)
+                        .await
+                    {
+                        Ok(bytes) => bytes,
 
-    // Copia dello user_id da spostare nel task della console
-    let user_id_cli = user_id.clone();
+                        Err(e) => {
+                            eprintln!(
+                                "Errore lettura input: {}",
+                                e
+                            );
 
+                            break;
+                        }
+                    };
 
-    /*
-     * Secondo channel interno al client.
-     *
-     * tx_cli:
-     *      usato dal task che legge la tastiera
-     *
-     * rx_cli:
-     *      usato dal main per ricevere i messaggi
-     *      e mandarli al server
-     */
-    let (tx_cli, mut rx_cli) =
-        tokio::sync::mpsc::channel::<Message>(10);
-
-
-    tokio::spawn(async move {
-
-        let stdin = tokio::io::stdin();
-
-        let mut reader =
-            BufReader::new(stdin);
-
-        let mut input = String::new();
-
-
-        loop {
-
-            input.clear();
-
-
-            if let Ok(bytes) =
-                reader.read_line(&mut input).await
-            {
 
                 // stdin chiuso
                 if bytes == 0 {
@@ -215,27 +235,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
 
-                // controllo del comando scelto
+                // ====================================================
+                // LOGOUT
+                // ====================================================
+
                 if text == "/logout" {
 
-                    let msg = Message::LogoutRequest {
-                        user_id: user_id_cli.clone(),
-                    };
+                    let msg =
+                        Message::LogoutRequest {
+                            user_id:
+                            user_id_cli.clone(),
+                        };
 
+
+                    /*
+                     * Mandiamo LogoutRequest al main.
+                     *
+                     * Sarà il main ad inviarlo
+                     * effettivamente sulla TCP.
+                     */
                     if tx_cli.send(msg).await.is_err() {
                         break;
                     }
 
-                    // Il task della console per questa sessione può terminare
-                    break;
 
-                } else if text.starts_with("/msg ") {
+                    /*
+                     * La console di questa sessione
+                     * non deve più accettare comandi.
+                     */
+                    break;
+                }
+
+
+                // ====================================================
+                // MESSAGGIO AL SERVER
+                // ====================================================
+
+                else if text.starts_with("/msg ") {
 
                     let msg_content =
                         text
                             .strip_prefix("/msg ")
                             .unwrap()
                             .trim();
+
+
+                    /*
+                     * Evitiamo anche:
+                     *
+                     * /msg
+                     *
+                     * senza testo.
+                     */
+                    if msg_content.is_empty() {
+
+                        println!(
+                            "Sistema: il messaggio non può essere vuoto."
+                        );
+
+                        continue;
+                    }
 
 
                     let msg =
@@ -248,83 +307,122 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
 
 
-                    // Mandiamo il messaggio al main
                     if tx_cli.send(msg).await.is_err() {
                         break;
                     }
+                }
 
-                } else {
+
+                // ====================================================
+                // COMANDO NON VALIDO
+                // ====================================================
+
+                else {
 
                     println!(
-                        "Sistema: usa il comando \
-                         /msg <testo> per inviare \
-                         un messaggio al server"
+                        "Sistema: comandi disponibili:"
+                    );
+
+                    println!(
+                        "/msg <testo>"
+                    );
+
+                    println!(
+                        "/logout"
                     );
                 }
             }
-        }
-    });
+        });
 
 
-    // ============================================================
-    // 4. MAIN LOOP DEL CLIENT
-    // ============================================================
-    //
-    // Il client deve gestire contemporaneamente:
-    //
-    // 1. messaggi ricevuti dal server
-    // 2. aggiornamenti GPS
-    // 3. messaggi scritti dall'utente
-    //
-    // tokio::select! aspetta che una qualsiasi
-    // di queste operazioni sia pronta.
+        // ============================================================
+        // 4. MAIN LOOP DELLA SESSIONE
+        // ============================================================
 
-    let mut line = String::new();
-
-
-    loop {
-
-        line.clear();
+        /*
+         * Questo loop gestisce contemporaneamente:
+         *
+         * 1. server -> client
+         * 2. GPS -> server
+         * 3. console -> server
+         */
+        let mut line =
+            String::new();
 
 
-        tokio::select! {
+        /*
+         * false:
+         * sessione normale
+         *
+         * true:
+         * LogoutRequest già inviato,
+         * stiamo aspettando LogoutResponse.
+         */
+        let mut logout_requested =
+            false;
 
 
-            // ====================================================
-            // RICEZIONE DAL SERVER
-            // ====================================================
+        loop {
 
-            bytes_read = reader.read_line(&mut line) => {
-
-                let bytes = bytes_read?;
+            line.clear();
 
 
-                // Se leggiamo 0 byte,
-                // il server ha chiuso la connessione
-                if bytes == 0 {
-
-                    println!(
-                        "Disconnesso dal server."
-                    );
-
-                    break;
-                }
+            tokio::select! {
 
 
-                /*
-                 * Trasformiamo il JSON ricevuto
-                 * in un Message Rust.
-                 */
-                if let Ok(msg) =
-                    serde_json::from_str::<Message>(&line)
-                {
+                // ====================================================
+                // RICEZIONE DAL SERVER
+                // ====================================================
+
+                bytes_read =
+                    reader.read_line(&mut line) => {
+
+                    let bytes =
+                        bytes_read?;
+
+
+                    /*
+                     * 0 byte significa che il server
+                     * ha chiuso la connessione.
+                     */
+                    if bytes == 0 {
+
+                        println!(
+                            "Disconnesso dal server."
+                        );
+
+                        break;
+                    }
+
+
+                    /*
+                     * Convertiamo il JSON ricevuto
+                     * in Message.
+                     */
+                    let msg =
+                        match serde_json
+                            ::from_str::<Message>(&line)
+                        {
+                            Ok(msg) => msg,
+
+                            Err(e) => {
+
+                                eprintln!(
+                                    "Messaggio non valido ricevuto dal server: {}",
+                                    e
+                                );
+
+                                continue;
+                            }
+                        };
+
 
                     match msg {
 
 
-                        // ----------------------------------------
-                        // Broadcast
-                        // ----------------------------------------
+                        // --------------------------------------------
+                        // BROADCAST
+                        // --------------------------------------------
 
                         Message::ServerToClientBroadcast {
                             content
@@ -337,9 +435,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
 
-                        // ----------------------------------------
-                        // Messaggio diretto
-                        // ----------------------------------------
+                        // --------------------------------------------
+                        // MESSAGGIO DIRETTO
+                        // --------------------------------------------
 
                         Message::ServerToClientDirect {
                             target_user_id: _,
@@ -353,65 +451,181 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
 
-                        // Altri tipi di messaggio
-                        // non vengono gestiti qui
+                        // --------------------------------------------
+                        // RISPOSTA AL LOGOUT
+                        // --------------------------------------------
+
+                        Message::LogoutResponse {
+                            success,
+                            message,
+                        } => {
+
+                            println!(
+                                "Server: {}",
+                                message
+                            );
+
+
+                            if success {
+
+                                /*
+                                 * Il server ha confermato
+                                 * di aver eliminato la sessione.
+                                 *
+                                 * Possiamo uscire dal loop
+                                 * della sessione.
+                                 */
+                                break;
+
+                            } else {
+
+                                /*
+                                 * Il server non ha effettuato
+                                 * il logout.
+                                 */
+                                logout_requested =
+                                    false;
+
+                                println!(
+                                    "Logout non riuscito."
+                                );
+                            }
+                        }
+
+
+                        // --------------------------------------------
+                        // ALTRI MESSAGGI
+                        // --------------------------------------------
+
                         _ => {}
                     }
                 }
-            }
 
 
-            // ====================================================
-            // INVIO GPS AL SERVER
-            // ====================================================
-
-            Some(msg) = rx_gps.recv() => {
+                // ====================================================
+                // INVIO GPS AL SERVER
+                // ====================================================
 
                 /*
-                 * Riceviamo un PositionUpdate
-                 * dal task GPS.
+                 * Questo ramo viene eseguito solamente
+                 * se NON abbiamo richiesto il logout.
                  */
+                Some(msg) = rx_gps.recv(),
+                if !logout_requested => {
 
-                let json =
-                    serde_json::to_string(&msg)?
-                    + "\n";
-
-
-                /*
-                 * Qui avviene la vera comunicazione
-                 * client -> server tramite TCP.
-                 */
-                write_half
-                    .write_all(json.as_bytes())
-                    .await?;
-            }
-
-            //TODO: GESTIONE RICHIESTA DI LOGOUT
-            
-            // ====================================================
-            // INVIO CHAT AL SERVER
-            // ====================================================
-
-            Some(msg) = rx_cli.recv() => {
-
-                /*
-                 * Riceviamo il messaggio dal task
-                 * che legge la tastiera.
-                 */
-
-                let json =
-                    serde_json::to_string(&msg)?
-                    + "\n";
+                    let json =
+                        serde_json::to_string(&msg)?
+                        + "\n";
 
 
-                // Invio tramite TCP
-                write_half
-                    .write_all(json.as_bytes())
-                    .await?;
+                    write_half
+                        .write_all(
+                            json.as_bytes()
+                        )
+                        .await?;
+                }
+
+
+                // ====================================================
+                // INVIO COMANDI CONSOLE AL SERVER
+                // ====================================================
+
+                Some(msg) = rx_cli.recv(),
+                if !logout_requested => {
+
+                    /*
+                     * Controlliamo se il messaggio
+                     * ricevuto dalla console è
+                     * LogoutRequest.
+                     */
+                    let is_logout =
+                        matches!(
+                            &msg,
+                            Message::LogoutRequest { .. }
+                        );
+
+
+                    // Convertiamo in JSON
+                    let json =
+                        serde_json::to_string(&msg)?
+                        + "\n";
+
+
+                    // Invio sulla TCP
+                    write_half
+                        .write_all(
+                            json.as_bytes()
+                        )
+                        .await?;
+
+
+                    if is_logout {
+
+                        /*
+                         * ATTENZIONE:
+                         *
+                         * qui NON facciamo break.
+                         *
+                         * Abbiamo solamente inviato
+                         * LogoutRequest.
+                         *
+                         * Aspettiamo la conferma
+                         * LogoutResponse dal server.
+                         */
+                        logout_requested =
+                            true;
+
+                        println!(
+                            "Logout in corso..."
+                        );
+                    }
+                }
             }
         }
+
+
+        // ============================================================
+        // 5. FINE DELLA SESSIONE
+        // ============================================================
+
+        /*
+         * Fermiamo i task appartenenti
+         * alla vecchia sessione.
+         */
+        gps_handle.abort();
+        cli_handle.abort();
+
+
+        /*
+         * Eliminiamo le due metà della connessione TCP.
+         *
+         * In questo modo la vecchia connessione
+         * viene chiusa.
+         */
+        drop(write_half);
+        drop(reader);
+
+
+        println!(
+            "Sessione terminata.\n"
+        );
+
+
+        /*
+         * NON facciamo return.
+         *
+         * Siamo dentro il loop esterno.
+         *
+         * Quindi da qui si torna automaticamente
+         * a:
+         *
+         * auth::authenticate().await?
+         *
+         * e viene mostrato nuovamente:
+         *
+         * === GeoRuggine ===
+         * 1) Login
+         * 2) Registrazione
+         */
     }
-
-
-    Ok(())
 }
