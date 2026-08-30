@@ -219,6 +219,20 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                     //FIXME: password salvate in chiaro
                     Message::LoginRequest { username, password } => {
                         let mut w_state = state.write().await;
+                        
+                        // Controllo per impedire il doppio login
+                        let is_already_connected = w_state.clients.values().any(|c| c.username == username);
+                        if is_already_connected {
+                            let response = Message::LoginResponse {
+                                success: false,
+                                user_id: None,
+                                message: "Utente già connesso su un altro dispositivo".to_string(),
+                            };
+                            let response_json = serde_json::to_string(&response)? + "\n";
+                            write_half.write_all(response_json.as_bytes()).await?;
+                            continue;
+                        }
+
                         if let Some(stored_pwd) = w_state.accounts.get(&username) {
                             //TODO: controlla hash e salt della password
                             if verify_password(&password,stored_pwd,) {
