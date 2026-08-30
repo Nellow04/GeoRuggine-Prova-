@@ -30,7 +30,7 @@ struct ServerState {
 //FIXME: rivedi gestione lock
 type SharedState = Arc<RwLock<ServerState>>;
 
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use sysinfo::{System, SystemExt, ProcessExt, get_current_pid};
 
@@ -141,15 +141,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         println!("Uso corretto: /stats <utente> <giorno|settimana|mese|all>");
                     }
-                } else {
+                } else if text.starts_with("/b ") {
+                    let msg_content = text.strip_prefix("/b ").unwrap().trim();
                     let broadcast_msg = Message::ServerToClientBroadcast { 
-                        content: text.to_string() 
+                        content: msg_content.to_string() 
                     };
                     let r_state = state_for_stdin.read().await;
                     for (_, client) in r_state.clients.iter() {
                         let _ = client.sender.send(broadcast_msg.clone()).await;
                     }
                     println!("Messaggio broadcast inviato a tutti");
+                } else {
+                    println!("--- Menu Comandi Server ---");
+                    println!("/msg <utente> <testo>  : Invia un messaggio privato a un utente");
+                    println!("/b <testo>             : Invia un messaggio broadcast a tutti");
+                    println!("/stats <utente> <int.> : Mostra le statistiche (all, giorno, settimana, mese)");
+                    println!("---------------------------");
                 }
             }
         }
@@ -224,6 +231,20 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                     //FIXME: password salvate in chiaro
                     Message::LoginRequest { username, password } => {
                         let mut w_state = state.write().await;
+                        
+                        // Controllo per impedire il doppio login
+                        let is_already_connected = w_state.clients.values().any(|c| c.username == username);
+                        if is_already_connected {
+                            let response = Message::LoginResponse {
+                                success: false,
+                                user_id: None,
+                                message: "Utente già connesso su un altro dispositivo".to_string(),
+                            };
+                            let response_json = serde_json::to_string(&response)? + "\n";
+                            write_half.write_all(response_json.as_bytes()).await?;
+                            continue;
+                        }
+
                         if let Some(stored_pwd) = w_state.accounts.get(&username) {
                             //TODO: controlla hash e salt della password
                             if verify_password(&password,stored_pwd,) {
@@ -302,7 +323,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                         };
 
                         // Messaggio diretto al server
-                        println!("(Messaggio per il Server) da {}: {}", sender_name, content);
+                        println!("Messaggio da {}: {}", sender_name, content);
                     },
                     _ => {}
                 }
