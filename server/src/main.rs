@@ -1,3 +1,6 @@
+mod analysis;
+mod auth;
+
 use chrono::{DateTime, Utc};
 use shared::{Coordinates, Message, UserState, UserId};
 use std::collections::HashMap;
@@ -5,44 +8,31 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, RwLock};
+use auth::{load_accounts, hash_password,verify_password,save_accounts};
 
-mod analysis;
 
 #[derive(Debug, Clone)]
 struct ClientData {
     username: String,
     state: UserState,
     last_position: Option<Coordinates>,
-    last_update_time: Option<DateTime<Utc>>,
-    position_history: Vec<(Coordinates, DateTime<Utc>)>,
+    last_move_time: Option<DateTime<Utc>>,
+    state_history: Vec<(UserState, DateTime<Utc>)>,
+    distance_history: Vec<(f64, DateTime<Utc>)>,
     sender: mpsc::Sender<Message>,
 }
 
 struct ServerState {
     clients: HashMap<UserId, ClientData>,
-    accounts: HashMap<String, String>, // username -> password
+    accounts: HashMap<String, String>, // username -> password hash
 }
 
+//FIXME: rivedi gestione lock
 type SharedState = Arc<RwLock<ServerState>>;
 
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
-use sysinfo::{System, SystemExt, CpuExt};
-
-fn load_accounts() -> HashMap<String, String> {
-    if let Ok(content) = fs::read_to_string("accounts.json") {
-        if let Ok(accounts) = serde_json::from_str(&content) {
-            return accounts;
-        }
-    }
-    HashMap::new()
-}
-
-fn save_accounts(accounts: &HashMap<String, String>) {
-    if let Ok(content) = serde_json::to_string_pretty(accounts) {
-        let _ = fs::write("accounts.json", content);
-    }
-}
+use sysinfo::{System, SystemExt, ProcessExt, get_current_pid};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -79,9 +69,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let target_name = parts[1];
                         let msg_content = parts[2];
                         let r_state = state_for_stdin.read().await;
+                        //FIXME: cambia nome del campo userid
                         let direct_msg = Message::ServerToClientDirect { 
                             target_user_id: "Server".to_string(), 
-                            content: format!("[SERVER PRIVATO]: {}", msg_content) 
+                            content: msg_content.to_string() 
                         };
                         let mut found = false;
                         for (_, client) in r_state.clients.iter() {
@@ -100,9 +91,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else if text.starts_with("/stats") {
                     let parts: Vec<&str> = text.split_whitespace().collect();
-                    if parts.len() >= 2 {
+                    if parts.len() == 3 {
                         let target_name = parts[1];
-                        let interval = if parts.len() > 2 { parts[2] } else { "all" };
+                        let interval = parts[2];
+
+                        if interval != "giorno" && interval != "settimana" && interval != "mese" && interval != "all" {
+                            println!("Intervallo '{}' non valido. Usa: giorno, settimana, mese, all", interval);
+                            continue;
+                        }
                         
                         let end_time = chrono::Utc::now();
                         let start_time = match interval {
@@ -128,7 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for (_, client) in r_state.clients.iter() {
                             if client.username == target_name {
                                 found = true;
-                                let result = analysis::analyze_movement(&client.position_history, start_time, end_time);
+                                let result = analysis::analyze_movement(&client.state_history, &client.distance_history, start_time, end_time);
                                 let state_str = match client.state {
                                     UserState::Fermo => "Fermo",
                                     UserState::InMovimento => "In Movimento",
@@ -143,17 +139,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("Utente {} non trovato tra gli utenti correnti.", target_name);
                         }
                     } else {
-                        println!("Uso corretto: /stats <utente> [giorno|settimana|mese|all]");
+                        println!("Uso corretto: /stats <utente> <giorno|settimana|mese|all>");
                     }
-                } else {
+                } else if text.starts_with("/b ") {
+                    let msg_content = text.strip_prefix("/b ").unwrap().trim();
                     let broadcast_msg = Message::ServerToClientBroadcast { 
-                        content: format!("[SERVER BROADCAST]: {}", text) 
+                        content: msg_content.to_string() 
                     };
                     let r_state = state_for_stdin.read().await;
                     for (_, client) in r_state.clients.iter() {
                         let _ = client.sender.send(broadcast_msg.clone()).await;
                     }
                     println!("Messaggio broadcast inviato a tutti");
+                } else {
+                    println!("--- Menu Comandi Server ---");
+                    println!("/msg <utente> <testo>  : Invia un messaggio privato a un utente");
+                    println!("/b <testo>             : Invia un messaggio broadcast a tutti");
+                    println!("/stats <utente> <int.> : Mostra le statistiche (all, giorno, settimana, mese)");
+                    println!("---------------------------");
                 }
             }
         }
@@ -211,8 +214,10 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             let response_json = serde_json::to_string(&response)? + "\n";
                             write_half.write_all(response_json.as_bytes()).await?;
                         } else {
-                            w_state.accounts.insert(username.clone(), password);
-                            save_accounts(&w_state.accounts);
+                            //fixme: hash password
+                            let hashed_password = hash_password(&password)?;
+                            w_state.accounts.insert(username.clone(), hashed_password);
+                            save_accounts(&w_state.accounts)?;
                             let response = Message::RegisterResponse {
                                 success: true,
                                 message: "Registrazione completata".to_string(),
@@ -222,10 +227,27 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             println!("Nuovo utente registrato: {}", username);
                         }
                     },
+
+                    //FIXME: password salvate in chiaro
                     Message::LoginRequest { username, password } => {
                         let mut w_state = state.write().await;
+                        
+                        // Controllo per impedire il doppio login
+                        let is_already_connected = w_state.clients.values().any(|c| c.username == username);
+                        if is_already_connected {
+                            let response = Message::LoginResponse {
+                                success: false,
+                                user_id: None,
+                                message: "Utente già connesso su un altro dispositivo".to_string(),
+                            };
+                            let response_json = serde_json::to_string(&response)? + "\n";
+                            write_half.write_all(response_json.as_bytes()).await?;
+                            continue;
+                        }
+
                         if let Some(stored_pwd) = w_state.accounts.get(&username) {
-                            if stored_pwd == &password {
+                            //TODO: controlla hash e salt della password
+                            if verify_password(&password,stored_pwd,) {
                                 let user_id = uuid::Uuid::new_v4().to_string();
                                 current_user_id = Some(user_id.clone());
                                 
@@ -233,8 +255,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                     username: username.clone(),
                                     state: UserState::Fermo, 
                                     last_position: None,
-                                    last_update_time: None,
-                                    position_history: Vec::new(),
+                                    last_move_time: None,
+                                    state_history: vec![(UserState::Fermo, Utc::now())],
+                                    distance_history: Vec::new(),
                                     sender: tx.clone(),
                                 };
                                 
@@ -271,24 +294,25 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                         if Some(user_id.clone()) == current_user_id {
                             let mut w_state = state.write().await;
                             if let Some(client) = w_state.clients.get_mut(&user_id) {
-                                // Verifica transizione di stato
                                 if let Some(last_pos) = &client.last_position {
-                                    let dist = crate::analysis::haversine_distance(last_pos, &coords);
+                                    let dist = crate::analysis::calculate_distance(last_pos, &coords);
+                                    
+                                    client.distance_history.push((dist, timestamp));
+                                    
                                     if dist > 0.001 {
                                         if client.state != UserState::InMovimento {
                                             client.state = UserState::InMovimento;
+                                            client.state_history.push((UserState::InMovimento, timestamp));
                                             println!("Utente {} è ora in stato: In Movimento", client.username);
                                         }
-                                        client.last_update_time = Some(timestamp);
+                                        client.last_move_time = Some(timestamp);
                                     }
                                 } else {
-                                    client.state = UserState::Fermo; // prima posizione
-                                    client.last_update_time = Some(timestamp);
-                                    println!("Utente {} è ora in stato: Fermo", client.username);
+                                    // prima posizione
+                                    client.last_move_time = Some(timestamp);
                                 }
                                 
                                 client.last_position = Some(coords.clone());
-                                client.position_history.push((coords, timestamp));
                             }
                         }
                     },
@@ -299,7 +323,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                         };
 
                         // Messaggio diretto al server
-                        println!("(Messaggio per il Server) da {}: {}", sender_name, content);
+                        println!("Messaggio da {}: {}", sender_name, content);
                     },
                     _ => {}
                 }
@@ -315,6 +339,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
         let mut w_state = state.write().await;
         if let Some(client) = w_state.clients.get_mut(&user_id) {
             client.state = UserState::Disconnected;
+            client.state_history.push((UserState::Disconnected, Utc::now()));
         }
         println!("Utente {} disconnesso", user_id);
     }
@@ -330,10 +355,11 @@ async fn state_monitor_task(state: SharedState) {
         let mut w_state = state.write().await;
         for (_, client) in w_state.clients.iter_mut() {
             if client.state == UserState::InMovimento {
-                if let Some(last_time) = client.last_update_time {
-                    // Se non ci sono aggiornamenti per 3 minuti
+                if let Some(last_time) = client.last_move_time {
+                    // Se non ci sono aggiornamenti di movimento per 3 minuti
                     if now.signed_duration_since(last_time).num_minutes() >= 3 {
                         client.state = UserState::Fermo;
+                        client.state_history.push((UserState::Fermo, now));
                         println!("Utente {} passato a stato Fermo per inattività", client.username);
                     }
                 }
@@ -342,24 +368,32 @@ async fn state_monitor_task(state: SharedState) {
     }
 }
 
+
+//FIXME: logga solo la cpu del server: Io userei il PID del processo corrente e sysinfo per leggere process.cpu_usage()
 async fn cpu_logger_task() {
-    let mut sys = System::new_all();
+    let mut sys = System::new();
+    let pid = get_current_pid().unwrap();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120)); // Ogni 2 minuti
     
-    // Assicuriamoci di fare il primo refresh prima del loop
-    sys.refresh_cpu();
+    // Primo refresh per inizializzare il calcolo per questo processo
+    sys.refresh_process(pid);
 
     loop {
         interval.tick().await;
-        sys.refresh_cpu();
-        let cpu_usage: f32 = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32;
+        sys.refresh_process(pid);
+        
+        let cpu_usage = if let Some(process) = sys.process(pid) {
+            process.cpu_usage()
+        } else {
+            0.0
+        };
         
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
             .open("cpu_log.txt") 
         {
-            let log_line = format!("[{}] CPU Usage: {:.2}%\n", Utc::now(), cpu_usage);
+            let log_line = format!("[{}] Server Process CPU Usage: {:.2}%\n", Utc::now(), cpu_usage);
             let _ = file.write_all(log_line.as_bytes());
         }
     }
