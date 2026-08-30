@@ -32,7 +32,7 @@ type SharedState = Arc<RwLock<ServerState>>;
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use sysinfo::{System, SystemExt, CpuExt};
+use sysinfo::{System, SystemExt, ProcessExt, get_current_pid};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         //FIXME: cambia nome del campo userid
                         let direct_msg = Message::ServerToClientDirect { 
                             target_user_id: "Server".to_string(), 
-                            content: format!("[SERVER PRIVATO]: {}", msg_content) 
+                            content: msg_content.to_string() 
                         };
                         let mut found = false;
                         for (_, client) in r_state.clients.iter() {
@@ -91,9 +91,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 } else if text.starts_with("/stats") {
                     let parts: Vec<&str> = text.split_whitespace().collect();
-                    if parts.len() >= 2 {
+                    if parts.len() == 3 {
                         let target_name = parts[1];
-                        let interval = if parts.len() > 2 { parts[2] } else { "all" };
+                        let interval = parts[2];
+
+                        if interval != "giorno" && interval != "settimana" && interval != "mese" && interval != "all" {
+                            println!("Intervallo '{}' non valido. Usa: giorno, settimana, mese, all", interval);
+                            continue;
+                        }
                         
                         let end_time = chrono::Utc::now();
                         let start_time = match interval {
@@ -134,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("Utente {} non trovato tra gli utenti correnti.", target_name);
                         }
                     } else {
-                        println!("Uso corretto: /stats <utente> [giorno|settimana|mese|all]");
+                        println!("Uso corretto: /stats <utente> <giorno|settimana|mese|all>");
                     }
                 } else if text.starts_with("/b ") {
                     let msg_content = text.strip_prefix("/b ").unwrap().trim();
@@ -366,23 +371,29 @@ async fn state_monitor_task(state: SharedState) {
 
 //FIXME: logga solo la cpu del server: Io userei il PID del processo corrente e sysinfo per leggere process.cpu_usage()
 async fn cpu_logger_task() {
-    let mut sys = System::new_all();
+    let mut sys = System::new();
+    let pid = get_current_pid().unwrap();
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120)); // Ogni 2 minuti
     
-    // Assicuriamoci di fare il primo refresh prima del loop
-    sys.refresh_cpu();
+    // Primo refresh per inizializzare il calcolo per questo processo
+    sys.refresh_process(pid);
 
     loop {
         interval.tick().await;
-        sys.refresh_cpu();
-        let cpu_usage: f32 = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / sys.cpus().len() as f32;
+        sys.refresh_process(pid);
+        
+        let cpu_usage = if let Some(process) = sys.process(pid) {
+            process.cpu_usage()
+        } else {
+            0.0
+        };
         
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
             .open("cpu_log.txt") 
         {
-            let log_line = format!("[{}] CPU Usage: {:.2}%\n", Utc::now(), cpu_usage);
+            let log_line = format!("[{}] Server Process CPU Usage: {:.2}%\n", Utc::now(), cpu_usage);
             let _ = file.write_all(log_line.as_bytes());
         }
     }
