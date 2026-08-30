@@ -146,24 +146,40 @@ fn read_choice() -> Result<AuthChoice, io::Error> {
 
 fn read_credentials() -> Result<(String, String), io::Error> {
 
-    // Username
-    print!("Username: ");
-    io::stdout().flush()?;
+    let username = loop {
+        print!("Username: ");
+        io::stdout().flush()?;
 
-    let mut username = String::new();
-    io::stdin().read_line(&mut username)?;
+        let mut username = String::new();
+        io::stdin().read_line(&mut username)?;
 
-    let username = username.trim().to_string();
+        let username = username.trim().to_string();
+
+        if username.is_empty() {
+            println!("Lo username non può essere vuoto.\n");
+            continue;
+        }
+
+        break username;
+    };
 
 
-    // Password
-    print!("Password: ");
-    io::stdout().flush()?;
+    let password = loop {
+        print!("Password: ");
+        io::stdout().flush()?;
 
-    let mut password = String::new();
-    io::stdin().read_line(&mut password)?;
+        let mut password = String::new();
+        io::stdin().read_line(&mut password)?;
 
-    let password = password.trim().to_string();
+        let password = password.trim().to_string();
+
+        if password.is_empty() {
+            println!("La password non può essere vuota.\n");
+            continue;
+        }
+
+        break password;
+    };
 
 
     Ok((username, password))
@@ -182,8 +198,7 @@ async fn register(
         password: password.to_string(),
     };
 
-    let json =
-        serde_json::to_string(&reg_msg)? + "\n";
+    let json =  serde_json::to_string(&reg_msg)? + "\n";
 
     // Invio richiesta al server
     write_half
