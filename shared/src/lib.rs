@@ -24,20 +24,29 @@ pub struct User {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
-    /// Registrazione di un nuovo utente
+    // Registrazione di un nuovo utente
     RegisterRequest { username: String, password: String },
-    /// Risposta alla registrazione
+    // Risposta alla registrazione
     RegisterResponse { success: bool, message: String },
-    /// Richiesta di login
+    // Richiesta di login
     LoginRequest { username: String, password: String },
-    /// Risposta al login
+    // Risposta al login
     LoginResponse { success: bool, user_id: Option<UserId>, message: String },
-    /// Invio periodico delle coordinate
+    // Invio periodico delle coordinate
     PositionUpdate { user_id: UserId, coords: Coordinates, timestamp: DateTime<Utc> },
-    /// Messaggio di testo dal client al server
+    // Messaggio di testo dal client al server
     ClientToServerText { user_id: UserId, content: String },
-    /// Messaggio di testo dal server a un client (Direct)
+    // Messaggio di testo dal server a un client (Direct)
     ServerToClientDirect { target_user_id: UserId, content: String },
-    /// Messaggio di testo dal server a tutti i client (Broadcast)
+    // Messaggio di testo dal server a tutti i client (Broadcast)
     ServerToClientBroadcast { content: String },
+    // Richiesta di logout
+    LogoutRequest {
+        user_id: String,
+    },
+    // Risposta alla richiesta di logout
+    LogoutResponse {
+        success: bool,
+        message: String,
+    },
 }

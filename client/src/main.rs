@@ -215,13 +215,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
 
-                /*
-                 * Il client può mandare messaggi al server
-                 * utilizzando:
-                 *
-                 * /msg testo
-                 */
-                if text.starts_with("/msg ") {
+                // controllo del comando scelto
+                if text == "/logout" {
+
+                    let msg = Message::LogoutRequest {
+                        user_id: user_id_cli.clone(),
+                    };
+
+                    if tx_cli.send(msg).await.is_err() {
+                        break;
+                    }
+
+                    // Il task della console per questa sessione può terminare
+                    break;
+
+                } else if text.starts_with("/msg ") {
 
                     let msg_content =
                         text
@@ -378,7 +386,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await?;
             }
 
-
+            //TODO: GESTIONE RICHIESTA DI LOGOUT
+            
             // ====================================================
             // INVIO CHAT AL SERVER
             // ====================================================
