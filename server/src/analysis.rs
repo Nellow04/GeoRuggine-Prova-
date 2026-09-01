@@ -55,7 +55,7 @@ pub fn analyze_movement(
     let first_event_time = state_history[0].1;
     let effective_start = std::cmp::max(start_time, first_event_time);
 
-    let mut current_eval_state = UserState::Disconnected;
+    let mut current_eval_state = UserState::Disconnesso;
     let mut last_eval_time = effective_start;
 
     // Troviamo lo stato in cui l'utente si trovava a effective_start
@@ -72,7 +72,7 @@ pub fn analyze_movement(
             match current_eval_state {
                 UserState::InMovimento => moving_time_secs += duration,
                 UserState::Fermo => pause_time_secs += duration,
-                UserState::Disconnected => {} // Il tempo disconnesso viene ignorato
+                UserState::Disconnesso => {} // Il tempo disconnesso viene ignorato
             }
             current_eval_state = state.clone();
             last_eval_time = time;
@@ -86,7 +86,7 @@ pub fn analyze_movement(
         match current_eval_state {
             UserState::InMovimento => moving_time_secs += final_duration,
             UserState::Fermo => pause_time_secs += final_duration,
-            UserState::Disconnected => {} 
+            UserState::Disconnesso => {} 
         }
     }
 
