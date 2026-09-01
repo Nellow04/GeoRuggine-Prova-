@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::fs;
+
 
 use argon2::{
     Argon2,
@@ -12,26 +11,7 @@ use argon2::{
     },
 };
 
-pub fn load_accounts() -> HashMap<String, String> {
-    if let Ok(content) = fs::read_to_string("accounts.json") {
-        if let Ok(accounts) = serde_json::from_str(&content) {
-            return accounts;
-        }
-    }
 
-    HashMap::new()
-}
-
-
-// ============================================================
-// SALVATAGGIO ACCOUNT
-// ============================================================
-
-pub fn save_accounts(accounts: &HashMap<String, String>) -> Result<(), Box<dyn std::error::Error>> {
-    let content = serde_json::to_string_pretty(accounts)?;
-    fs::write("accounts.json", content)?;
-    Ok(())
-}
 
 
 pub fn hash_password(
