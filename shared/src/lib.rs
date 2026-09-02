@@ -22,7 +22,7 @@ pub struct User {
     pub username: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Message {
     /// Registrazione di un nuovo utente
     RegisterRequest { username: String, password: String },

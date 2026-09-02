@@ -194,6 +194,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                 if bytes_read == 0 {
                     break; // EOF
                 }
+
+                // TODO [DEBUG]: Stampa di debug per visualizzare tutti i segnali JSON in arrivo (da rimuovere in produzione)
+                println!("[DEBUG RICEVUTO]: {}", line.trim());
                 
                 let msg: Message = match serde_json::from_str(&line) {
                     Ok(m) => m,
@@ -217,7 +220,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             //fixme: hash password
                             let hashed_password = hash_password(&password)?;
                             w_state.accounts.insert(username.clone(), hashed_password);
-                            save_accounts(&w_state.accounts)?;
+                            save_accounts(&w_state.accounts)? ;
                             let response = Message::RegisterResponse {
                                 success: true,
                                 message: "Registrazione completata".to_string(),
@@ -233,7 +236,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                         let mut w_state = state.write().await;
                         
                         // Controllo per impedire il doppio login
-                        let is_already_connected = w_state.clients.values().any(|c| c.username == username);
+                        let is_already_connected = w_state.clients.values().any(|c| c.username == username && c.state != UserState::Disconnected);
                         if is_already_connected {
                             let response = Message::LoginResponse {
                                 success: false,
