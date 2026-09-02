@@ -390,7 +390,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                             client.state = UserState::InMovimento;
                                             client.state_history.push((UserState::InMovimento, timestamp));
                                             let _ = db::insert_state(&pool, &user_id, "In Movimento", timestamp);
-                                            println!("Utente {} è ora in stato: In Movimento", client.username);
+                                            //println!("Utente {} è ora in stato: In Movimento", client.username);
                                         }
                                         client.last_move_time = Some(timestamp);
                                     }
@@ -449,7 +449,7 @@ async fn state_monitor_task(state: SharedState) {
                         client.state = UserState::Fermo;
                         client.state_history.push((UserState::Fermo, now));
                         let _ = db::insert_state(&pool, user_id, "Fermo", now);
-                        println!("Utente {} passato a stato Fermo per inattività", client.username);
+                        //println!("Utente {} passato a stato Fermo per inattività", client.username);
                     }
                 }
             }
