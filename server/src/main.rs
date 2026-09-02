@@ -2,15 +2,31 @@ mod analysis;
 mod auth;
 mod db;
 
+use auth::{hash_password, load_accounts, save_accounts, verify_password};
+
 use chrono::{DateTime, Utc};
-use shared::{Coordinates, Message, UserState, UserId};
+
+use shared::{Coordinates, Message, UserId, UserState};
+
 use std::collections::HashMap;
 use std::sync::Arc;
+
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
 use tokio::net::{TcpListener, TcpStream};
+
 use tokio::sync::{mpsc, RwLock};
 use auth::{hash_password, verify_password};
 use db::{init_db, DbPool};
+
+use std::fs::OpenOptions;
+use std::io::Write;
+
+use sysinfo::{get_current_pid, ProcessExt, System, SystemExt};
+
+// ============================================================
+// DATI CLIENT
+// ============================================================
 
 #[derive(Debug, Clone)]
 struct ClientData {
@@ -23,17 +39,27 @@ struct ClientData {
     sender: mpsc::Sender<Message>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct UserHistory {
+    state_history: Vec<(UserState, DateTime<Utc>)>,
+    distance_history: Vec<(f64, DateTime<Utc>)>,
+}
+
+// ============================================================
+// STATO SERVER
+// ============================================================
+
 struct ServerState {
     clients: HashMap<UserId, ClientData>,
     db_pool: DbPool,
 }
 
-//FIXME: rivedi gestione lock
+// FIXME: rivedi gestione lock
 type SharedState = Arc<RwLock<ServerState>>;
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use sysinfo::{System, SystemExt, ProcessExt, get_current_pid};
+// ============================================================
+// MAIN
+// ============================================================
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -42,40 +68,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         clients: HashMap::new(),
         db_pool,
     };
+
     let state: SharedState = Arc::new(RwLock::new(state_data));
+
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
+
     println!("Server in ascolto su 127.0.0.1:8080");
 
+    // ========================================================
+    // TASK MONITORAGGIO STATO UTENTI
+    // ========================================================
+
     let state_clone = state.clone();
+
     tokio::spawn(async move {
         state_monitor_task(state_clone).await;
     });
 
+    // ========================================================
+    // TASK INPUT CONSOLE SERVER
+    // ========================================================
+
     let state_for_stdin = state.clone();
+
     tokio::spawn(async move {
         let stdin = tokio::io::stdin();
+
         let mut reader = tokio::io::BufReader::new(stdin);
+
         let mut input = String::new();
-        use tokio::io::AsyncBufReadExt;
-        
+
         loop {
             input.clear();
+
             if let Ok(bytes) = reader.read_line(&mut input).await {
-                if bytes == 0 { break; }
+                if bytes == 0 {
+                    break;
+                }
+
                 let text = input.trim();
-                if text.is_empty() { continue; }
+
+                if text.is_empty() {
+                    continue;
+                }
+
+                // =================================================
+                // MESSAGGIO PRIVATO
+                // =================================================
 
                 if text.starts_with("/msg ") {
                     let parts: Vec<&str> = text.splitn(3, ' ').collect();
+
                     if parts.len() == 3 {
                         let target_name = parts[1];
+
                         let msg_content = parts[2];
+
                         let r_state = state_for_stdin.read().await;
-                        //FIXME: cambia nome del campo userid
-                        let direct_msg = Message::ServerToClientDirect { 
-                            target_user_id: "Server".to_string(), 
-                            content: msg_content.to_string() 
+
+                        // FIXME: cambia nome del campo userid
+                        let direct_msg = Message::ServerToClientDirect {
+                            target_user_id: "Server".to_string(),
+
+                            content: msg_content.to_string(),
                         };
+
                         let mut found = false;
                         for (uid, client) in r_state.clients.iter() {
                             if client.username == target_name {
@@ -84,6 +141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 found = true;
                             }
                         }
+
                         if found {
                             println!("Messaggio privato inviato a {}", target_name);
                         } else {
@@ -92,35 +150,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         println!("Uso corretto: /msg <utente> <messaggio>");
                     }
-                } else if text.starts_with("/stats") {
+                }
+                // =================================================
+                // STATISTICHE
+                // =================================================
+                else if text.starts_with("/stats") {
                     let parts: Vec<&str> = text.split_whitespace().collect();
+
                     if parts.len() == 3 {
                         let target_name = parts[1];
+
                         let interval = parts[2];
 
-                        if interval != "giorno" && interval != "settimana" && interval != "mese" && interval != "all" {
-                            println!("Intervallo '{}' non valido. Usa: giorno, settimana, mese, all", interval);
+                        if interval != "giorno"
+                            && interval != "settimana"
+                            && interval != "mese"
+                            && interval != "all"
+                        {
+                            println!(
+                                "Intervallo '{}' non valido. \
+                                 Usa: giorno, settimana, mese, all",
+                                interval
+                            );
+
                             continue;
                         }
-                        
+
                         let end_time = chrono::Utc::now();
+
                         let start_time = match interval {
                             "giorno" => {
                                 use chrono::{Datelike, TimeZone};
-                                chrono::Utc.with_ymd_and_hms(end_time.year(), end_time.month(), end_time.day(), 0, 0, 0).unwrap()
-                            },
+
+                                chrono::Utc
+                                    .with_ymd_and_hms(
+                                        end_time.year(),
+                                        end_time.month(),
+                                        end_time.day(),
+                                        0,
+                                        0,
+                                        0,
+                                    )
+                                    .unwrap()
+                            }
+
                             "settimana" => {
                                 use chrono::{Datelike, TimeZone};
+
                                 let days_from_monday = end_time.weekday().num_days_from_monday();
-                                let monday = end_time - chrono::Duration::days(days_from_monday as i64);
-                                chrono::Utc.with_ymd_and_hms(monday.year(), monday.month(), monday.day(), 0, 0, 0).unwrap()
-                            },
+
+                                let monday =
+                                    end_time - chrono::Duration::days(days_from_monday as i64);
+
+                                chrono::Utc
+                                    .with_ymd_and_hms(
+                                        monday.year(),
+                                        monday.month(),
+                                        monday.day(),
+                                        0,
+                                        0,
+                                        0,
+                                    )
+                                    .unwrap()
+                            }
+
                             "mese" => {
                                 use chrono::{Datelike, TimeZone};
-                                chrono::Utc.with_ymd_and_hms(end_time.year(), end_time.month(), 1, 0, 0, 0).unwrap()
-                            },
+
+                                chrono::Utc
+                                    .with_ymd_and_hms(end_time.year(), end_time.month(), 1, 0, 0, 0)
+                                    .unwrap()
+                            }
+
                             _ => chrono::DateTime::<Utc>::MIN_UTC,
                         };
+
+                        // ricerca dello storico
 
                         let r_state = state_for_stdin.read().await;
                         
@@ -153,17 +258,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(e) => println!("Errore DB: {}", e),
                         }
                     } else {
-                        println!("Uso corretto: /stats <utente> <giorno|settimana|mese|all>");
+                        println!(
+                            "Uso corretto: \
+                             /stats <utente> \
+                             <giorno|settimana|mese|all>"
+                        );
                     }
-                } else if text.starts_with("/b ") {
+                }
+                // =================================================
+                // BROADCAST
+                // =================================================
+                else if text.starts_with("/b ") {
                     let msg_content = text.strip_prefix("/b ").unwrap().trim();
-                    let broadcast_msg = Message::ServerToClientBroadcast { 
-                        content: msg_content.to_string() 
+
+                    let broadcast_msg = Message::ServerToClientBroadcast {
+                        content: msg_content.to_string(),
                     };
+
                     let r_state = state_for_stdin.read().await;
+
                     for (_, client) in r_state.clients.iter() {
                         let _ = client.sender.send(broadcast_msg.clone()).await;
                     }
+
                     println!("Messaggio broadcast inviato a tutti");
                 } else if text.starts_with("/chat ") {
                     let parts: Vec<&str> = text.split_whitespace().collect();
@@ -207,13 +324,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // ========================================================
+    // TASK LOGGER CPU
+    // ========================================================
+
     tokio::spawn(async move {
         cpu_logger_task().await;
     });
 
+    // ========================================================
+    // ACCETTAZIONE CLIENT
+    // ========================================================
+
     loop {
         let (socket, _) = listener.accept().await?;
+
         let state_clone = state.clone();
+
         tokio::spawn(async move {
             if let Err(e) = handle_client(socket, state_clone).await {
                 eprintln!("Errore client: {}", e);
@@ -222,17 +349,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), Box<dyn std::error::Error>> {
+// ============================================================
+// GESTIONE CLIENT
+// ============================================================
+
+async fn handle_client(
+    mut socket: TcpStream,
+    state: SharedState,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (read_half, mut write_half) = socket.split();
+
     let mut reader = BufReader::new(read_half);
+
     let mut line = String::new();
 
-    // 1. Auth Phase
+    /*
+     * Contiene lo user_id dell'utente
+     * autenticato su questa connessione.
+     *
+     * None = nessun utente autenticato.
+     */
     let mut current_user_id: Option<UserId> = None;
+
+    /*
+     * Channel utilizzato dal server
+     * per inviare messaggi al client.
+     */
     let (tx, mut rx) = mpsc::channel::<Message>(32);
+
+    // ========================================================
+    // LOOP DELLA CONNESSIONE
+    // ========================================================
 
     loop {
         line.clear();
+
         tokio::select! {
             bytes_read = reader.read_line(&mut line) => {
                 let bytes_read = bytes_read?;
@@ -290,10 +441,6 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                 user_id: None,
                                 message: "Utente già connesso su un altro dispositivo".to_string(),
                             };
-                            let response_json = serde_json::to_string(&response)? + "\n";
-                            write_half.write_all(response_json.as_bytes()).await?;
-                            continue;
-                        }
 
                         match db::get_user_by_name(&w_state.db_pool, &username) {
                             Ok(Some((db_id, db_hash))) => {
@@ -336,8 +483,13 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                     user_id: None,
                                     message: "Utente non trovato".to_string(),
                                 };
-                                let response_json = serde_json::to_string(&response)? + "\n";
-                                write_half.write_all(response_json.as_bytes()).await?;
+
+
+                                println!(
+                                    "Messaggio da {}: {}",
+                                    sender_name,
+                                    content
+                                );
                             }
                             Err(e) => {
                                 eprintln!("Errore DB in login: {}", e);
@@ -362,15 +514,99 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                             let _ = db::insert_state(&pool, &user_id, "In Movimento", timestamp);
                                             println!("Utente {} è ora in stato: In Movimento", client.username);
                                         }
-                                        client.last_move_time = Some(timestamp);
+                                    };
+
+
+                                    /*
+                                     * Confermiamo al client
+                                     * che il logout è riuscito.
+                                     */
+                                    let response =
+                                        Message::LogoutResponse {
+                                            success: true,
+                                            message:
+                                                "Logout effettuato correttamente"
+                                                    .to_string(),
+                                        };
+
+
+                                    let response_json =
+                                        serde_json::to_string(
+                                            &response
+                                        )? + "\n";
+
+
+                                    write_half
+                                        .write_all(
+                                            response_json.as_bytes()
+                                        )
+                                        .await?;
+
+
+                                    if let Some(username) =
+                                        username
+                                    {
+
+                                        println!(
+                                            "Utente {} disconnesso",
+                                            username
+                                        );
                                     }
+
+
+                                    /*
+                                     * La sessione è già stata
+                                     * eliminata dalla HashMap.
+                                     *
+                                     * Mettiamo None così il cleanup
+                                     * finale non tenta di eliminarla
+                                     * una seconda volta.
+                                     */
+                                    current_user_id =
+                                        None;
+
+
+                                    /*
+                                     * Terminiamo il loop che gestisce
+                                     * questa specifica connessione TCP.
+                                     */
+                                    break;
+
                                 } else {
-                                    // prima posizione
-                                    client.last_move_time = Some(timestamp);
+
+                                    /*
+                                     * Lo user_id ricevuto non coincide
+                                     * con quello della sessione.
+                                     */
+                                    let response =
+                                        Message::LogoutResponse {
+                                            success: false,
+                                            message:
+                                                "Sessione non valida"
+                                                    .to_string(),
+                                        };
+
+
+                                    let response_json =
+                                        serde_json::to_string(
+                                            &response
+                                        )? + "\n";
+
+
+                                    write_half
+                                        .write_all(
+                                            response_json.as_bytes()
+                                        )
+                                        .await?;
                                 }
-                                
-                                client.last_position = Some(coords.clone());
                             }
+
+
+                            // =========================================
+                            // ALTRI MESSAGGI
+                            // =========================================
+
+                            _ => {}
                         }
                     },
                     Message::ClientToServerText { user_id, content } => {
@@ -384,13 +620,22 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                     },
                     _ => {}
                 }
-            }
-            Some(out_msg) = rx.recv() => {
-                let json = serde_json::to_string(&out_msg)? + "\n";
-                write_half.write_all(json.as_bytes()).await?;
-            }
-        }
     }
+
+    // ========================================================
+    // CLEANUP DISCONNESSIONE IMPREVISTA
+    // ========================================================
+    //
+    // Questo blocco serve quando il client NON usa /logout,
+    // ad esempio:
+    //
+    // - chiude il programma
+    // - perde la connessione
+    // - crasha
+    //
+    // Se invece ha fatto /logout,
+    // current_user_id è già None.
+    // in questo modo salviamo anche lo storico
 
     if let Some(user_id) = current_user_id {
         let mut w_state = state.write().await;
@@ -400,25 +645,36 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
             client.state_history.push((UserState::Disconnected, now));
             let _ = db::insert_state(&w_state.db_pool, &user_id, "Sconnesso", now);
         }
-        println!("Utente {} disconnesso", user_id);
     }
 
     Ok(())
 }
 
+// ============================================================
+// MONITORAGGIO STATO UTENTI
+// ============================================================
+
 async fn state_monitor_task(state: SharedState) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+
     loop {
         interval.tick().await;
+
         let now = Utc::now();
+
         let mut w_state = state.write().await;
         let pool = w_state.db_pool.clone();
         for (user_id, client) in w_state.clients.iter_mut() {
             if client.state == UserState::InMovimento {
                 if let Some(last_time) = client.last_move_time {
-                    // Se non ci sono aggiornamenti di movimento per 3 minuti
+                    /*
+                     * Se non ci sono aggiornamenti
+                     * di movimento per 3 minuti,
+                     * passa allo stato Fermo.
+                     */
                     if now.signed_duration_since(last_time).num_minutes() >= 3 {
                         client.state = UserState::Fermo;
+
                         client.state_history.push((UserState::Fermo, now));
                         let _ = db::insert_state(&pool, user_id, "Fermo", now);
                         println!("Utente {} passato a stato Fermo per inattività", client.username);
@@ -429,32 +685,42 @@ async fn state_monitor_task(state: SharedState) {
     }
 }
 
+// ============================================================
+// CPU LOGGER
+// ============================================================
 
-//FIXME: logga solo la cpu del server: Io userei il PID del processo corrente e sysinfo per leggere process.cpu_usage()
 async fn cpu_logger_task() {
     let mut sys = System::new();
+
     let pid = get_current_pid().unwrap();
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120)); // Ogni 2 minuti
-    
-    // Primo refresh per inizializzare il calcolo per questo processo
+
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120));
+
+    // Primo refresh
     sys.refresh_process(pid);
 
     loop {
         interval.tick().await;
+
         sys.refresh_process(pid);
-        
+
         let cpu_usage = if let Some(process) = sys.process(pid) {
             process.cpu_usage()
         } else {
             0.0
         };
-        
+
         if let Ok(mut file) = OpenOptions::new()
             .create(true)
             .append(true)
-            .open("cpu_log.txt") 
+            .open("cpu_log.txt")
         {
-            let log_line = format!("[{}] Server Process CPU Usage: {:.2}%\n", Utc::now(), cpu_usage);
+            let log_line = format!(
+                "[{}] Server Process CPU Usage: {:.2}%\n",
+                Utc::now(),
+                cpu_usage
+            );
+
             let _ = file.write_all(log_line.as_bytes());
         }
     }
