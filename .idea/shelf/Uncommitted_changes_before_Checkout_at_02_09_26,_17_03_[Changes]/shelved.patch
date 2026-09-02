@@ -1,0 +1,199 @@
+Index: server/src/main.rs
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+>mod analysis;\nmod auth;\nmod db;\n\nuse auth::{hash_password, load_accounts, save_accounts, verify_password};\n\nuse chrono::{DateTime, Utc};\n\nuse shared::{Coordinates, Message, UserId, UserState};\n\nuse std::collections::HashMap;\nuse std::sync::Arc;\n\nuse tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};\n\nuse tokio::net::{TcpListener, TcpStream};\n\nuse tokio::sync::{mpsc, RwLock};\nuse auth::{hash_password, verify_password};\nuse db::{init_db, DbPool};\n\nuse std::fs::OpenOptions;\nuse std::io::Write;\n\nuse sysinfo::{get_current_pid, ProcessExt, System, SystemExt};\n\n// ============================================================\n// DATI CLIENT\n// ============================================================\n\n#[derive(Debug, Clone)]\nstruct ClientData {\n    username: String,\n    state: UserState,\n    last_position: Option<Coordinates>,\n    last_move_time: Option<DateTime<Utc>>,\n    state_history: Vec<(UserState, DateTime<Utc>)>,\n    distance_history: Vec<(f64, DateTime<Utc>)>,\n    sender: mpsc::Sender<Message>,\n}\n\n#[derive(Debug, Clone, Default)]\nstruct UserHistory {\n    state_history: Vec<(UserState, DateTime<Utc>)>,\n    distance_history: Vec<(f64, DateTime<Utc>)>,\n}\n\n// ============================================================\n// STATO SERVER\n// ============================================================\n\nstruct ServerState {\n    clients: HashMap<UserId, ClientData>,\n    db_pool: DbPool,\n}\n\n// FIXME: rivedi gestione lock\ntype SharedState = Arc<RwLock<ServerState>>;\n\n// ============================================================\n// MAIN\n// ============================================================\n\n#[tokio::main]\nasync fn main() -> Result<(), Box<dyn std::error::Error>> {\n    let db_pool = init_db().expect(\"Impossibile inizializzare il database\");\n    let state_data = ServerState {\n        clients: HashMap::new(),\n        db_pool,\n    };\n\n    let state: SharedState = Arc::new(RwLock::new(state_data));\n\n    let listener = TcpListener::bind(\"127.0.0.1:8080\").await?;\n\n    println!(\"Server in ascolto su 127.0.0.1:8080\");\n\n    // ========================================================\n    // TASK MONITORAGGIO STATO UTENTI\n    // ========================================================\n\n    let state_clone = state.clone();\n\n    tokio::spawn(async move {\n        state_monitor_task(state_clone).await;\n    });\n\n    // ========================================================\n    // TASK INPUT CONSOLE SERVER\n    // ========================================================\n\n    let state_for_stdin = state.clone();\n\n    tokio::spawn(async move {\n        let stdin = tokio::io::stdin();\n\n        let mut reader = tokio::io::BufReader::new(stdin);\n\n        let mut input = String::new();\n\n        loop {\n            input.clear();\n\n            if let Ok(bytes) = reader.read_line(&mut input).await {\n                if bytes == 0 {\n                    break;\n                }\n\n                let text = input.trim();\n\n                if text.is_empty() {\n                    continue;\n                }\n\n                // =================================================\n                // MESSAGGIO PRIVATO\n                // =================================================\n\n                if text.starts_with(\"/msg \") {\n                    let parts: Vec<&str> = text.splitn(3, ' ').collect();\n\n                    if parts.len() == 3 {\n                        let target_name = parts[1];\n\n                        let msg_content = parts[2];\n\n                        let r_state = state_for_stdin.read().await;\n\n                        // FIXME: cambia nome del campo userid\n                        let direct_msg = Message::ServerToClientDirect {\n                            target_user_id: \"Server\".to_string(),\n\n                            content: msg_content.to_string(),\n                        };\n\n                        let mut found = false;\n                        for (uid, client) in r_state.clients.iter() {\n                            if client.username == target_name {\n                                let _ = client.sender.send(direct_msg.clone()).await;\n                                let _ = db::insert_chat(&r_state.db_pool, \"Server\", Some(uid), msg_content, Utc::now());\n                                found = true;\n                            }\n                        }\n\n                        if found {\n                            println!(\"Messaggio privato inviato a {}\", target_name);\n                        } else {\n                            println!(\"Utente {} non trovato\", target_name);\n                        }\n                    } else {\n                        println!(\"Uso corretto: /msg <utente> <messaggio>\");\n                    }\n                }\n                // =================================================\n                // STATISTICHE\n                // =================================================\n                else if text.starts_with(\"/stats\") {\n                    let parts: Vec<&str> = text.split_whitespace().collect();\n\n                    if parts.len() == 3 {\n                        let target_name = parts[1];\n\n                        let interval = parts[2];\n\n                        if interval != \"giorno\"\n                            && interval != \"settimana\"\n                            && interval != \"mese\"\n                            && interval != \"all\"\n                        {\n                            println!(\n                                \"Intervallo '{}' non valido. \\\n                                 Usa: giorno, settimana, mese, all\",\n                                interval\n                            );\n\n                            continue;\n                        }\n\n                        let end_time = chrono::Utc::now();\n\n                        let start_time = match interval {\n                            \"giorno\" => {\n                                use chrono::{Datelike, TimeZone};\n\n                                chrono::Utc\n                                    .with_ymd_and_hms(\n                                        end_time.year(),\n                                        end_time.month(),\n                                        end_time.day(),\n                                        0,\n                                        0,\n                                        0,\n                                    )\n                                    .unwrap()\n                            }\n\n                            \"settimana\" => {\n                                use chrono::{Datelike, TimeZone};\n\n                                let days_from_monday = end_time.weekday().num_days_from_monday();\n\n                                let monday =\n                                    end_time - chrono::Duration::days(days_from_monday as i64);\n\n                                chrono::Utc\n                                    .with_ymd_and_hms(\n                                        monday.year(),\n                                        monday.month(),\n                                        monday.day(),\n                                        0,\n                                        0,\n                                        0,\n                                    )\n                                    .unwrap()\n                            }\n\n                            \"mese\" => {\n                                use chrono::{Datelike, TimeZone};\n\n                                chrono::Utc\n                                    .with_ymd_and_hms(end_time.year(), end_time.month(), 1, 0, 0, 0)\n                                    .unwrap()\n                            }\n\n                            _ => chrono::DateTime::<Utc>::MIN_UTC,\n                        };\n\n                        // ricerca dello storico\n\n                        let r_state = state_for_stdin.read().await;\n                        \n                        match db::get_user_by_name(&r_state.db_pool, target_name) {\n                            Ok(Some((uid, _))) => {\n                                match db::get_user_history(&r_state.db_pool, &uid, start_time, end_time) {\n                                    Ok((states, distances)) => {\n                                        let result = analysis::analyze_movement(&states, &distances, start_time, end_time);\n                                        \n                                        // Trova lo stato attuale se online\n                                        let mut state_str = \"Sconnesso\";\n                                        for (_, client) in r_state.clients.iter() {\n                                            if client.username == target_name {\n                                                state_str = match client.state {\n                                                    UserState::Fermo => \"Fermo\",\n                                                    UserState::InMovimento => \"In Movimento\",\n                                                    UserState::Disconnected => \"Sconnesso\",\n                                                };\n                                                break;\n                                            }\n                                        }\n                                        \n                                        println!(\"=== STATISTICHE per {} ({}) ===\\nStato Attuale: {}\\nDistanza: {:.2} km\\nVelocità Media: {:.2} km/h\\nTempo in Movimento: {} sec\\nTempo Pause: {} sec\\n===============================\", \n                                            target_name, interval, state_str, result.total_distance_km, result.average_speed_kmh, result.moving_time_secs, result.pause_time_secs);\n                                    }\n                                    Err(e) => println!(\"Errore nel recupero storico: {}\", e),\n                                }\n                            }\n                            Ok(None) => println!(\"Utente {} non trovato nel database.\", target_name),\n                            Err(e) => println!(\"Errore DB: {}\", e),\n                        }\n                    } else {\n                        println!(\n                            \"Uso corretto: \\\n                             /stats <utente> \\\n                             <giorno|settimana|mese|all>\"\n                        );\n                    }\n                }\n                // =================================================\n                // BROADCAST\n                // =================================================\n                else if text.starts_with(\"/b \") {\n                    let msg_content = text.strip_prefix(\"/b \").unwrap().trim();\n\n                    let broadcast_msg = Message::ServerToClientBroadcast {\n                        content: msg_content.to_string(),\n                    };\n\n                    let r_state = state_for_stdin.read().await;\n\n                    for (_, client) in r_state.clients.iter() {\n                        let _ = client.sender.send(broadcast_msg.clone()).await;\n                    }\n\n                    println!(\"Messaggio broadcast inviato a tutti\");\n                } else if text.starts_with(\"/chat \") {\n                    let parts: Vec<&str> = text.split_whitespace().collect();\n                    if parts.len() == 2 {\n                        let target_name = parts[1];\n                        let r_state = state_for_stdin.read().await;\n                        \n                        match db::get_user_by_name(&r_state.db_pool, target_name) {\n                            Ok(Some((uid, _))) => {\n                                match db::get_chat_history(&r_state.db_pool, &uid) {\n                                    Ok(chats) => {\n                                        println!(\"=== STORICO CHAT con {} ===\", target_name);\n                                        if chats.is_empty() {\n                                            println!(\"(Nessun messaggio)\");\n                                        } else {\n                                            for (sender, content, ts) in chats {\n                                                let display_sender = if sender == \"Server\" { \"Server\" } else { target_name };\n                                                println!(\"[{}] {}: {}\", ts.format(\"%Y-%m-%d %H:%M:%S\"), display_sender, content);\n                                            }\n                                        }\n                                        println!(\"===============================\");\n                                    }\n                                    Err(e) => println!(\"Errore nel recupero chat: {}\", e),\n                                }\n                            }\n                            Ok(None) => println!(\"Utente {} non trovato nel database.\", target_name),\n                            Err(e) => println!(\"Errore DB: {}\", e),\n                        }\n                    } else {\n                        println!(\"Uso corretto: /chat <utente>\");\n                    }\n                } else {\n                    println!(\"--- Menu Comandi Server ---\");\n                    println!(\"/msg <utente> <testo>  : Invia un messaggio privato a un utente\");\n                    println!(\"/b <testo>             : Invia un messaggio broadcast a tutti\");\n                    println!(\"/stats <utente> <int.> : Mostra le statistiche (all, giorno, settimana, mese)\");\n                    println!(\"/chat <utente>         : Mostra lo storico dei messaggi con un utente\");\n                    println!(\"---------------------------\");\n                }\n            }\n        }\n    });\n\n    // ========================================================\n    // TASK LOGGER CPU\n    // ========================================================\n\n    tokio::spawn(async move {\n        cpu_logger_task().await;\n    });\n\n    // ========================================================\n    // ACCETTAZIONE CLIENT\n    // ========================================================\n\n    loop {\n        let (socket, _) = listener.accept().await?;\n\n        let state_clone = state.clone();\n\n        tokio::spawn(async move {\n            if let Err(e) = handle_client(socket, state_clone).await {\n                eprintln!(\"Errore client: {}\", e);\n            }\n        });\n    }\n}\n\n// ============================================================\n// GESTIONE CLIENT\n// ============================================================\n\nasync fn handle_client(\n    mut socket: TcpStream,\n    state: SharedState,\n) -> Result<(), Box<dyn std::error::Error>> {\n    let (read_half, mut write_half) = socket.split();\n\n    let mut reader = BufReader::new(read_half);\n\n    let mut line = String::new();\n\n    /*\n     * Contiene lo user_id dell'utente\n     * autenticato su questa connessione.\n     *\n     * None = nessun utente autenticato.\n     */\n    let mut current_user_id: Option<UserId> = None;\n\n    /*\n     * Channel utilizzato dal server\n     * per inviare messaggi al client.\n     */\n    let (tx, mut rx) = mpsc::channel::<Message>(32);\n\n    // ========================================================\n    // LOOP DELLA CONNESSIONE\n    // ========================================================\n\n    loop {\n        line.clear();\n\n        tokio::select! {\n            bytes_read = reader.read_line(&mut line) => {\n                let bytes_read = bytes_read?;\n                if bytes_read == 0 {\n                    break; // EOF\n                }\n                \n                let msg: Message = match serde_json::from_str(&line) {\n                    Ok(m) => m,\n                    Err(e) => {\n                        eprintln!(\"Errore parsing JSON: {}\", e);\n                        continue;\n                    }\n                };\n\n                match msg {\n                    Message::RegisterRequest { username, password } => {\n                        let w_state = state.write().await;\n                        // Hashing password\n                        let hashed_password = hash_password(&password)?;\n                        let new_id = uuid::Uuid::new_v4().to_string();\n                        \n                        match db::register_user(&w_state.db_pool, &new_id, &username, &hashed_password) {\n                            Ok(true) => {\n                                let response = Message::RegisterResponse {\n                                    success: true,\n                                    message: \"Registrazione completata\".to_string(),\n                                };\n                                let response_json = serde_json::to_string(&response)? + \"\\n\";\n                                write_half.write_all(response_json.as_bytes()).await?;\n                                println!(\"Nuovo utente registrato: {}\", username);\n                            }\n                            Ok(false) => {\n                                let response = Message::RegisterResponse {\n                                    success: false,\n                                    message: \"Utente già esistente\".to_string(),\n                                };\n                                let response_json = serde_json::to_string(&response)? + \"\\n\";\n                                write_half.write_all(response_json.as_bytes()).await?;\n                            }\n                            Err(e) => {\n                                eprintln!(\"Errore DB in registrazione: {}\", e);\n                            }\n                        }\n                    },\n\n                    Message::LoginRequest { username, password } => {\n                        let mut w_state = state.write().await;\n                        \n                        // Controllo per impedire il doppio login\n                        let is_already_connected = w_state.clients.values().any(|c| c.username == username);\n                        if is_already_connected {\n                            let response = Message::LoginResponse {\n                                success: false,\n                                user_id: None,\n                                message: \"Utente già connesso su un altro dispositivo\".to_string(),\n                            };\n\n                        match db::get_user_by_name(&w_state.db_pool, &username) {\n                            Ok(Some((db_id, db_hash))) => {\n                                if verify_password(&password, &db_hash) {\n                                    current_user_id = Some(db_id.clone());\n                                    \n                                    let client_data = ClientData {\n                                        username: username.clone(),\n                                        state: UserState::Fermo, \n                                        last_position: None,\n                                        last_move_time: None,\n                                        state_history: vec![(UserState::Fermo, Utc::now())],\n                                        distance_history: Vec::new(),\n                                        sender: tx.clone(),\n                                    };\n                                    \n                                    w_state.clients.insert(db_id.clone(), client_data);\n                                    \n                                    let response = Message::LoginResponse {\n                                        success: true,\n                                        user_id: Some(db_id.clone()),\n                                        message: format!(\"Benvenuto {}\", username),\n                                    };\n                                    let response_json = serde_json::to_string(&response)? + \"\\n\";\n                                    write_half.write_all(response_json.as_bytes()).await?;\n                                    println!(\"Utente {} autenticato con ID {}\", username, db_id);\n                                } else {\n                                    let response = Message::LoginResponse {\n                                        success: false,\n                                        user_id: None,\n                                        message: \"Password errata\".to_string(),\n                                    };\n                                    let response_json = serde_json::to_string(&response)? + \"\\n\";\n                                    write_half.write_all(response_json.as_bytes()).await?;\n                                }\n                            }\n                            Ok(None) => {\n                                let response = Message::LoginResponse {\n                                    success: false,\n                                    user_id: None,\n                                    message: \"Utente non trovato\".to_string(),\n                                };\n\n\n                                println!(\n                                    \"Messaggio da {}: {}\",\n                                    sender_name,\n                                    content\n                                );\n                            }\n                            Err(e) => {\n                                eprintln!(\"Errore DB in login: {}\", e);\n                            }\n                        }\n                    },\n                    Message::PositionUpdate { user_id, coords, timestamp } => {\n                        if Some(user_id.clone()) == current_user_id {\n                            let mut w_state = state.write().await;\n                            let pool = w_state.db_pool.clone();\n                            if let Some(client) = w_state.clients.get_mut(&user_id) {\n                                if let Some(last_pos) = &client.last_position {\n                                    let dist = crate::analysis::calculate_distance(last_pos, &coords);\n                                    \n                                    client.distance_history.push((dist, timestamp));\n                                    let _ = db::insert_distance(&pool, &user_id, dist, timestamp);\n                                    \n                                    if dist > 0.001 {\n                                        if client.state != UserState::InMovimento {\n                                            client.state = UserState::InMovimento;\n                                            client.state_history.push((UserState::InMovimento, timestamp));\n                                            let _ = db::insert_state(&pool, &user_id, \"In Movimento\", timestamp);\n                                            println!(\"Utente {} è ora in stato: In Movimento\", client.username);\n                                        }\n                                    };\n\n\n                                    /*\n                                     * Confermiamo al client\n                                     * che il logout è riuscito.\n                                     */\n                                    let response =\n                                        Message::LogoutResponse {\n                                            success: true,\n                                            message:\n                                                \"Logout effettuato correttamente\"\n                                                    .to_string(),\n                                        };\n\n\n                                    let response_json =\n                                        serde_json::to_string(\n                                            &response\n                                        )? + \"\\n\";\n\n\n                                    write_half\n                                        .write_all(\n                                            response_json.as_bytes()\n                                        )\n                                        .await?;\n\n\n                                    if let Some(username) =\n                                        username\n                                    {\n\n                                        println!(\n                                            \"Utente {} disconnesso\",\n                                            username\n                                        );\n                                    }\n\n\n                                    /*\n                                     * La sessione è già stata\n                                     * eliminata dalla HashMap.\n                                     *\n                                     * Mettiamo None così il cleanup\n                                     * finale non tenta di eliminarla\n                                     * una seconda volta.\n                                     */\n                                    current_user_id =\n                                        None;\n\n\n                                    /*\n                                     * Terminiamo il loop che gestisce\n                                     * questa specifica connessione TCP.\n                                     */\n                                    break;\n\n                                } else {\n\n                                    /*\n                                     * Lo user_id ricevuto non coincide\n                                     * con quello della sessione.\n                                     */\n                                    let response =\n                                        Message::LogoutResponse {\n                                            success: false,\n                                            message:\n                                                \"Sessione non valida\"\n                                                    .to_string(),\n                                        };\n\n\n                                    let response_json =\n                                        serde_json::to_string(\n                                            &response\n                                        )? + \"\\n\";\n\n\n                                    write_half\n                                        .write_all(\n                                            response_json.as_bytes()\n                                        )\n                                        .await?;\n                                }\n                            }\n\n\n                            // =========================================\n                            // ALTRI MESSAGGI\n                            // =========================================\n\n                            _ => {}\n                        }\n                    },\n                    Message::ClientToServerText { user_id, content } => {\n                        let w_state = state.write().await;\n                        let sender_name = w_state.clients.get(&user_id).map(|c| c.username.clone()).unwrap_or_else(|| user_id.clone());\n\n                        let _ = db::insert_chat(&w_state.db_pool, &user_id, Some(\"Server\"), &content, Utc::now());\n                        \n                        // Messaggio diretto al server\n                        println!(\"Messaggio da {}: {}\", sender_name, content);\n                    },\n                    _ => {}\n                }\n    }\n\n    // ========================================================\n    // CLEANUP DISCONNESSIONE IMPREVISTA\n    // ========================================================\n    //\n    // Questo blocco serve quando il client NON usa /logout,\n    // ad esempio:\n    //\n    // - chiude il programma\n    // - perde la connessione\n    // - crasha\n    //\n    // Se invece ha fatto /logout,\n    // current_user_id è già None.\n    // in questo modo salviamo anche lo storico\n\n    if let Some(user_id) = current_user_id {\n        let mut w_state = state.write().await;\n        if let Some(client) = w_state.clients.get_mut(&user_id) {\n            client.state = UserState::Disconnected;\n            let now = Utc::now();\n            client.state_history.push((UserState::Disconnected, now));\n            let _ = db::insert_state(&w_state.db_pool, &user_id, \"Sconnesso\", now);\n        }\n    }\n\n    Ok(())\n}\n\n// ============================================================\n// MONITORAGGIO STATO UTENTI\n// ============================================================\n\nasync fn state_monitor_task(state: SharedState) {\n    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));\n\n    loop {\n        interval.tick().await;\n\n        let now = Utc::now();\n\n        let mut w_state = state.write().await;\n        let pool = w_state.db_pool.clone();\n        for (user_id, client) in w_state.clients.iter_mut() {\n            if client.state == UserState::InMovimento {\n                if let Some(last_time) = client.last_move_time {\n                    /*\n                     * Se non ci sono aggiornamenti\n                     * di movimento per 3 minuti,\n                     * passa allo stato Fermo.\n                     */\n                    if now.signed_duration_since(last_time).num_minutes() >= 3 {\n                        client.state = UserState::Fermo;\n\n                        client.state_history.push((UserState::Fermo, now));\n                        let _ = db::insert_state(&pool, user_id, \"Fermo\", now);\n                        println!(\"Utente {} passato a stato Fermo per inattività\", client.username);\n                    }\n                }\n            }\n        }\n    }\n}\n\n// ============================================================\n// CPU LOGGER\n// ============================================================\n\nasync fn cpu_logger_task() {\n    let mut sys = System::new();\n\n    let pid = get_current_pid().unwrap();\n\n    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120));\n\n    // Primo refresh\n    sys.refresh_process(pid);\n\n    loop {\n        interval.tick().await;\n\n        sys.refresh_process(pid);\n\n        let cpu_usage = if let Some(process) = sys.process(pid) {\n            process.cpu_usage()\n        } else {\n            0.0\n        };\n\n        if let Ok(mut file) = OpenOptions::new()\n            .create(true)\n            .append(true)\n            .open(\"cpu_log.txt\")\n        {\n            let log_line = format!(\n                \"[{}] Server Process CPU Usage: {:.2}%\\n\",\n                Utc::now(),\n                cpu_usage\n            );\n\n            let _ = file.write_all(log_line.as_bytes());\n        }\n    }\n}\n
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/server/src/main.rs b/server/src/main.rs
+--- a/server/src/main.rs	(revision cc3dfecacbf4c5f166e58dce8017addab47d2e20)
++++ b/server/src/main.rs	(date 1788359363470)
+@@ -2,26 +2,17 @@
+ mod auth;
+ mod db;
+ 
+-use auth::{hash_password, load_accounts, save_accounts, verify_password};
+-
++use auth::{hash_password, verify_password};
+ use chrono::{DateTime, Utc};
+-
+ use shared::{Coordinates, Message, UserId, UserState};
+-
+ use std::collections::HashMap;
+ use std::sync::Arc;
+-
+ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+-
+ use tokio::net::{TcpListener, TcpStream};
+-
+ use tokio::sync::{mpsc, RwLock};
+-use auth::{hash_password, verify_password};
+ use db::{init_db, DbPool};
+-
+ use std::fs::OpenOptions;
+ use std::io::Write;
+-
+ use sysinfo::{get_current_pid, ProcessExt, System, SystemExt};
+ 
+ // ============================================================
+@@ -39,16 +30,6 @@
+     sender: mpsc::Sender<Message>,
+ }
+ 
+-#[derive(Debug, Clone, Default)]
+-struct UserHistory {
+-    state_history: Vec<(UserState, DateTime<Utc>)>,
+-    distance_history: Vec<(f64, DateTime<Utc>)>,
+-}
+-
+-// ============================================================
+-// STATO SERVER
+-// ============================================================
+-
+ struct ServerState {
+     clients: HashMap<UserId, ClientData>,
+     db_pool: DbPool,
+@@ -70,9 +51,7 @@
+     };
+ 
+     let state: SharedState = Arc::new(RwLock::new(state_data));
+-
+     let listener = TcpListener::bind("127.0.0.1:8080").await?;
+-
+     println!("Server in ascolto su 127.0.0.1:8080");
+ 
+     // ========================================================
+@@ -80,7 +59,6 @@
+     // ========================================================
+ 
+     let state_clone = state.clone();
+-
+     tokio::spawn(async move {
+         state_monitor_task(state_clone).await;
+     });
+@@ -228,13 +206,13 @@
+                         // ricerca dello storico
+ 
+                         let r_state = state_for_stdin.read().await;
+-                        
++
+                         match db::get_user_by_name(&r_state.db_pool, target_name) {
+                             Ok(Some((uid, _))) => {
+                                 match db::get_user_history(&r_state.db_pool, &uid, start_time, end_time) {
+                                     Ok((states, distances)) => {
+                                         let result = analysis::analyze_movement(&states, &distances, start_time, end_time);
+-                                        
++
+                                         // Trova lo stato attuale se online
+                                         let mut state_str = "Sconnesso";
+                                         for (_, client) in r_state.clients.iter() {
+@@ -247,8 +225,8 @@
+                                                 break;
+                                             }
+                                         }
+-                                        
+-                                        println!("=== STATISTICHE per {} ({}) ===\nStato Attuale: {}\nDistanza: {:.2} km\nVelocità Media: {:.2} km/h\nTempo in Movimento: {} sec\nTempo Pause: {} sec\n===============================", 
++
++                                        println!("=== STATISTICHE per {} ({}) ===\nStato Attuale: {}\nDistanza: {:.2} km\nVelocità Media: {:.2} km/h\nTempo in Movimento: {} sec\nTempo Pause: {} sec\n===============================",
+                                             target_name, interval, state_str, result.total_distance_km, result.average_speed_kmh, result.moving_time_secs, result.pause_time_secs);
+                                     }
+                                     Err(e) => println!("Errore nel recupero storico: {}", e),
+@@ -287,7 +265,7 @@
+                     if parts.len() == 2 {
+                         let target_name = parts[1];
+                         let r_state = state_for_stdin.read().await;
+-                        
++
+                         match db::get_user_by_name(&r_state.db_pool, target_name) {
+                             Ok(Some((uid, _))) => {
+                                 match db::get_chat_history(&r_state.db_pool, &uid) {
+@@ -346,7 +324,7 @@
+                 eprintln!("Errore client: {}", e);
+             }
+         });
+-    }
++}
+ }
+ 
+ // ============================================================
+@@ -390,7 +368,7 @@
+                 if bytes_read == 0 {
+                     break; // EOF
+                 }
+-                
++
+                 let msg: Message = match serde_json::from_str(&line) {
+                     Ok(m) => m,
+                     Err(e) => {
+@@ -405,7 +383,7 @@
+                         // Hashing password
+                         let hashed_password = hash_password(&password)?;
+                         let new_id = uuid::Uuid::new_v4().to_string();
+-                        
++
+                         match db::register_user(&w_state.db_pool, &new_id, &username, &hashed_password) {
+                             Ok(true) => {
+                                 let response = Message::RegisterResponse {
+@@ -432,7 +410,7 @@
+ 
+                     Message::LoginRequest { username, password } => {
+                         let mut w_state = state.write().await;
+-                        
++
+                         // Controllo per impedire il doppio login
+                         let is_already_connected = w_state.clients.values().any(|c| c.username == username);
+                         if is_already_connected {
+@@ -446,19 +424,19 @@
+                             Ok(Some((db_id, db_hash))) => {
+                                 if verify_password(&password, &db_hash) {
+                                     current_user_id = Some(db_id.clone());
+-                                    
++
+                                     let client_data = ClientData {
+                                         username: username.clone(),
+-                                        state: UserState::Fermo, 
++                                        state: UserState::Fermo,
+                                         last_position: None,
+                                         last_move_time: None,
+                                         state_history: vec![(UserState::Fermo, Utc::now())],
+                                         distance_history: Vec::new(),
+                                         sender: tx.clone(),
+                                     };
+-                                    
++
+                                     w_state.clients.insert(db_id.clone(), client_data);
+-                                    
++
+                                     let response = Message::LoginResponse {
+                                         success: true,
+                                         user_id: Some(db_id.clone()),
+@@ -503,10 +481,10 @@
+                             if let Some(client) = w_state.clients.get_mut(&user_id) {
+                                 if let Some(last_pos) = &client.last_position {
+                                     let dist = crate::analysis::calculate_distance(last_pos, &coords);
+-                                    
++
+                                     client.distance_history.push((dist, timestamp));
+                                     let _ = db::insert_distance(&pool, &user_id, dist, timestamp);
+-                                    
++
+                                     if dist > 0.001 {
+                                         if client.state != UserState::InMovimento {
+                                             client.state = UserState::InMovimento;
+@@ -614,7 +592,7 @@
+                         let sender_name = w_state.clients.get(&user_id).map(|c| c.username.clone()).unwrap_or_else(|| user_id.clone());
+ 
+                         let _ = db::insert_chat(&w_state.db_pool, &user_id, Some("Server"), &content, Utc::now());
+-                        
++
+                         // Messaggio diretto al server
+                         println!("Messaggio da {}: {}", sender_name, content);
+                     },
+@@ -650,6 +628,7 @@
+     Ok(())
+ }
+ 
++
+ // ============================================================
+ // MONITORAGGIO STATO UTENTI
+ // ============================================================
