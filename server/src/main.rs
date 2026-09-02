@@ -131,13 +131,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let result = analysis::analyze_movement(&states, &distances, start_time, end_time);
                                         
                                         // Trova lo stato attuale se online
-                                        let mut state_str = "Sconnesso";
+                                        let mut state_str = "Disconnesso";
                                         for (_, client) in r_state.clients.iter() {
                                             if client.username == target_name {
                                                 state_str = match client.state {
                                                     UserState::Fermo => "Fermo",
                                                     UserState::InMovimento => "In Movimento",
-                                                    UserState::Disconnected => "Sconnesso",
+                                                    UserState::Disconnesso => "Disconnesso",
                                                 };
                                                 break;
                                             }
@@ -235,7 +235,13 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
         line.clear();
         tokio::select! {
             bytes_read = reader.read_line(&mut line) => {
-                let bytes_read = bytes_read?;
+                let bytes_read = match bytes_read {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("Errore lettura client: {}", e);
+                        break;
+                    }
+                };
                 if bytes_read == 0 {
                     break; // EOF
                 }
@@ -252,7 +258,13 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                     Message::RegisterRequest { username, password } => {
                         let w_state = state.write().await;
                         // Hashing password
-                        let hashed_password = hash_password(&password)?;
+                        let hashed_password = match hash_password(&password) {
+                            Ok(h) => h,
+                            Err(e) => {
+                                eprintln!("Errore hash password: {}", e);
+                                continue;
+                            }
+                        };
                         let new_id = uuid::Uuid::new_v4().to_string();
                         
                         match db::register_user(&w_state.db_pool, &new_id, &username, &hashed_password) {
@@ -262,7 +274,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                     message: "Registrazione completata".to_string(),
                                 };
                                 let response_json = serde_json::to_string(&response)? + "\n";
-                                write_half.write_all(response_json.as_bytes()).await?;
+                                if write_half.write_all(response_json.as_bytes()).await.is_err() {
+                                    break;
+                                }
                                 println!("Nuovo utente registrato: {}", username);
                             }
                             Ok(false) => {
@@ -271,7 +285,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                     message: "Utente già esistente".to_string(),
                                 };
                                 let response_json = serde_json::to_string(&response)? + "\n";
-                                write_half.write_all(response_json.as_bytes()).await?;
+                                if write_half.write_all(response_json.as_bytes()).await.is_err() {
+                                    break;
+                                }
                             }
                             Err(e) => {
                                 eprintln!("Errore DB in registrazione: {}", e);
@@ -282,8 +298,8 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                     Message::LoginRequest { username, password } => {
                         let mut w_state = state.write().await;
                         
-                        // Controllo per impedire il doppio login
-                        let is_already_connected = w_state.clients.values().any(|c| c.username == username);
+                        // Controllo per impedire il doppio login di utenti attivi
+                        let is_already_connected = w_state.clients.values().any(|c| c.username == username && c.state != UserState::Disconnesso);
                         if is_already_connected {
                             let response = Message::LoginResponse {
                                 success: false,
@@ -291,7 +307,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                 message: "Utente già connesso su un altro dispositivo".to_string(),
                             };
                             let response_json = serde_json::to_string(&response)? + "\n";
-                            write_half.write_all(response_json.as_bytes()).await?;
+                            if write_half.write_all(response_json.as_bytes()).await.is_err() {
+                                break;
+                            }
                             continue;
                         }
 
@@ -299,17 +317,19 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             Ok(Some((db_id, db_hash))) => {
                                 if verify_password(&password, &db_hash) {
                                     current_user_id = Some(db_id.clone());
+                                    let now = Utc::now();
                                     
                                     let client_data = ClientData {
                                         username: username.clone(),
                                         state: UserState::Fermo, 
                                         last_position: None,
                                         last_move_time: None,
-                                        state_history: vec![(UserState::Fermo, Utc::now())],
+                                        state_history: vec![(UserState::Fermo, now)],
                                         distance_history: Vec::new(),
                                         sender: tx.clone(),
                                     };
                                     
+                                    let _ = db::insert_state(&w_state.db_pool, &db_id, "Fermo", now);
                                     w_state.clients.insert(db_id.clone(), client_data);
                                     
                                     let response = Message::LoginResponse {
@@ -318,7 +338,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                         message: format!("Benvenuto {}", username),
                                     };
                                     let response_json = serde_json::to_string(&response)? + "\n";
-                                    write_half.write_all(response_json.as_bytes()).await?;
+                                    if write_half.write_all(response_json.as_bytes()).await.is_err() {
+                                        break;
+                                    }
                                     println!("Utente {} autenticato con ID {}", username, db_id);
                                 } else {
                                     let response = Message::LoginResponse {
@@ -327,7 +349,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                         message: "Password errata".to_string(),
                                     };
                                     let response_json = serde_json::to_string(&response)? + "\n";
-                                    write_half.write_all(response_json.as_bytes()).await?;
+                                    if write_half.write_all(response_json.as_bytes()).await.is_err() {
+                                        break;
+                                    }
                                 }
                             }
                             Ok(None) => {
@@ -337,7 +361,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                     message: "Utente non trovato".to_string(),
                                 };
                                 let response_json = serde_json::to_string(&response)? + "\n";
-                                write_half.write_all(response_json.as_bytes()).await?;
+                                if write_half.write_all(response_json.as_bytes()).await.is_err() {
+                                    break;
+                                }
                             }
                             Err(e) => {
                                 eprintln!("Errore DB in login: {}", e);
@@ -360,7 +386,6 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                             client.state = UserState::InMovimento;
                                             client.state_history.push((UserState::InMovimento, timestamp));
                                             let _ = db::insert_state(&pool, &user_id, "In Movimento", timestamp);
-                                            println!("Utente {} è ora in stato: In Movimento", client.username);
                                         }
                                         client.last_move_time = Some(timestamp);
                                     }
@@ -387,7 +412,9 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
             }
             Some(out_msg) = rx.recv() => {
                 let json = serde_json::to_string(&out_msg)? + "\n";
-                write_half.write_all(json.as_bytes()).await?;
+                if write_half.write_all(json.as_bytes()).await.is_err() {
+                    break;
+                }
             }
         }
     }
@@ -395,10 +422,10 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
     if let Some(user_id) = current_user_id {
         let mut w_state = state.write().await;
         if let Some(client) = w_state.clients.get_mut(&user_id) {
-            client.state = UserState::Disconnected;
+            client.state = UserState::Disconnesso;
             let now = Utc::now();
-            client.state_history.push((UserState::Disconnected, now));
-            let _ = db::insert_state(&w_state.db_pool, &user_id, "Sconnesso", now);
+            client.state_history.push((UserState::Disconnesso, now));
+            let _ = db::insert_state(&w_state.db_pool, &user_id, "Disconnesso", now);
         }
         println!("Utente {} disconnesso", user_id);
     }
@@ -421,7 +448,6 @@ async fn state_monitor_task(state: SharedState) {
                         client.state = UserState::Fermo;
                         client.state_history.push((UserState::Fermo, now));
                         let _ = db::insert_state(&pool, user_id, "Fermo", now);
-                        println!("Utente {} passato a stato Fermo per inattività", client.username);
                     }
                 }
             }

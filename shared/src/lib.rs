@@ -11,7 +11,7 @@ pub struct Coordinates {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum UserState {
-    Disconnected,
+    Disconnesso,
     Fermo,
     InMovimento,
 }

@@ -123,7 +123,7 @@ pub fn get_user_history(
         let ts = chrono::DateTime::parse_from_rfc3339(&ts_str).unwrap().with_timezone(&chrono::Utc);
         let state = match state_str.as_str() {
             "In Movimento" => shared::UserState::InMovimento,
-            "Sconnesso" => shared::UserState::Disconnected,
+            "Disconnesso" | "Sconnesso" | "Disconnected" => shared::UserState::Disconnesso,
             _ => shared::UserState::Fermo,
         };
         states.push((state, ts));
