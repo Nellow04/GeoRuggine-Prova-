@@ -331,7 +331,6 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                     
                                     let _ = db::insert_state(&w_state.db_pool, &db_id, "Fermo", now);
                                     w_state.clients.insert(db_id.clone(), client_data);
-                                    let _ = db::insert_state(&w_state.db_pool, &db_id, "Fermo", Utc::now());
                                     
                                     let response = Message::LoginResponse {
                                         success: true,
@@ -342,7 +341,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                     if write_half.write_all(response_json.as_bytes()).await.is_err() {
                                         break;
                                     }
-                                    println!("Utente {} autenticato con ID {}", username, db_id);
+                                    println!("Utente {} autenticato.", username);
                                 } else {
                                     let response = Message::LoginResponse {
                                         success: false,
@@ -376,7 +375,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             let mut w_state = state.write().await;
                             let username = if let Some(client) = w_state.clients.remove(&user_id) {
                                 let now = Utc::now();
-                                let _ = db::insert_state(&w_state.db_pool, &user_id, "Sconnesso", now);
+                                let _ = db::insert_state(&w_state.db_pool, &user_id, "Disconnesso", now);
                                 client.username
                             } else {
                                 user_id.clone()
@@ -388,7 +387,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             };
                             let response_json = serde_json::to_string(&response)? + "\n";
                             let _ = write_half.write_all(response_json.as_bytes()).await;
-                            println!("Utente {} ({}) ha effettuato il logout", username, user_id);
+                            println!("Utente {} ha effettuato il logout", username);
 
                             current_user_id = None;
                         } else {
@@ -451,11 +450,13 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
 
     if let Some(user_id) = current_user_id {
         let mut w_state = state.write().await;
+        let pool = w_state.db_pool.clone();
         if let Some(client) = w_state.clients.get_mut(&user_id) {
             client.state = UserState::Disconnesso;
             let now = Utc::now();
             client.state_history.push((UserState::Disconnesso, now));
-            let _ = db::insert_state(&w_state.db_pool, &user_id, "Disconnesso", now);
+            let _ = db::insert_state(&pool, &user_id, "Disconnesso", now);
+            println!("Utente {} disconnesso.", client.username);
         }
     }
 
