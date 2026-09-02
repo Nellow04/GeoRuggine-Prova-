@@ -32,6 +32,10 @@ pub enum Message {
     LoginRequest { username: String, password: String },
     /// Risposta al login
     LoginResponse { success: bool, user_id: Option<UserId>, message: String },
+    /// Richiesta di logout
+    LogoutRequest { user_id: UserId },
+    /// Risposta al logout
+    LogoutResponse { success: bool, message: String },
     /// Invio periodico delle coordinate
     PositionUpdate { user_id: UserId, coords: Coordinates, timestamp: DateTime<Utc> },
     /// Messaggio di testo dal client al server
