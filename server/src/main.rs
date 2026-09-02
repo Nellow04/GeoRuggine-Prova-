@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if found {
                             println!("Messaggio privato inviato a {}", target_name);
                         } else {
-                            println!("Utente {} non trovato", target_name);
+                            println!("Utente {} non trovato o non connesso", target_name);
                         }
                     } else {
                         println!("Uso corretto: /msg <utente> <messaggio>");
@@ -216,7 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state_clone = state.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_client(socket, state_clone).await {
-                eprintln!("Errore client: {}", e);
+                eprintln!("Errore gestione client: {}", e);
             }
         });
     }
@@ -331,6 +331,7 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                                     
                                     let _ = db::insert_state(&w_state.db_pool, &db_id, "Fermo", now);
                                     w_state.clients.insert(db_id.clone(), client_data);
+                                    let _ = db::insert_state(&w_state.db_pool, &db_id, "Fermo", Utc::now());
                                     
                                     let response = Message::LoginResponse {
                                         success: true,
@@ -368,6 +369,35 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
                             Err(e) => {
                                 eprintln!("Errore DB in login: {}", e);
                             }
+                        }
+                    },
+                    Message::LogoutRequest { user_id } => {
+                        if current_user_id.as_ref() == Some(&user_id) {
+                            let mut w_state = state.write().await;
+                            let username = if let Some(client) = w_state.clients.remove(&user_id) {
+                                let now = Utc::now();
+                                let _ = db::insert_state(&w_state.db_pool, &user_id, "Sconnesso", now);
+                                client.username
+                            } else {
+                                user_id.clone()
+                            };
+
+                            let response = Message::LogoutResponse {
+                                success: true,
+                                message: "Logout effettuato con successo".to_string(),
+                            };
+                            let response_json = serde_json::to_string(&response)? + "\n";
+                            let _ = write_half.write_all(response_json.as_bytes()).await;
+                            println!("Utente {} ({}) ha effettuato il logout", username, user_id);
+
+                            current_user_id = None;
+                        } else {
+                            let response = Message::LogoutResponse {
+                                success: false,
+                                message: "Utente non autorizzato al logout".to_string(),
+                            };
+                            let response_json = serde_json::to_string(&response)? + "\n";
+                            let _ = write_half.write_all(response_json.as_bytes()).await;
                         }
                     },
                     Message::PositionUpdate { user_id, coords, timestamp } => {
@@ -427,7 +457,6 @@ async fn handle_client(mut socket: TcpStream, state: SharedState) -> Result<(), 
             client.state_history.push((UserState::Disconnesso, now));
             let _ = db::insert_state(&w_state.db_pool, &user_id, "Disconnesso", now);
         }
-        println!("Utente {} disconnesso", user_id);
     }
 
     Ok(())
@@ -455,8 +484,6 @@ async fn state_monitor_task(state: SharedState) {
     }
 }
 
-
-//FIXME: logga solo la cpu del server: Io userei il PID del processo corrente e sysinfo per leggere process.cpu_usage()
 async fn cpu_logger_task() {
     let mut sys = System::new();
     let pid = get_current_pid().unwrap();
