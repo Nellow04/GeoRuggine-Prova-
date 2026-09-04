@@ -8,7 +8,6 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::db::DbPool;
 
-
 // ============================================================
 // DATI CLIENT CONNESSO
 // ============================================================
@@ -24,20 +23,23 @@ pub struct ClientData {
     pub sender: mpsc::Sender<Message>,
 }
 
-
 // ============================================================
 // STATO GLOBALE SERVER
 // ============================================================
 
+/// Stato condiviso dell'applicazione.
+///
+/// Disaccoppia la gestione della memoria in-flight (`clients`) dal database (`db_pool`):
+/// - `clients`: richiede sincronizzazione esplicita tramite `RwLock` per gestire le connessioni attive.
+/// - `db_pool`: è già intrinsecamente thread-safe (`r2d2::Pool` si basa internamente su `Arc`),
+///   quindi può essere acceduto liberamente e in parallelo senza alcun lock su `clients`.
 pub struct ServerState {
-    pub clients: HashMap<UserId, ClientData>,
+    pub clients: RwLock<HashMap<UserId, ClientData>>,
     pub db_pool: DbPool,
 }
-
 
 // ============================================================
 // STATO CONDIVISO
 // ============================================================
 
-// FIXME: rivedere gestione lock
-pub type SharedState = Arc<RwLock<ServerState>>;
+pub type SharedState = Arc<ServerState>;

@@ -39,17 +39,12 @@ async fn main()
     // STATO SERVER
     // ========================================================
 
-    let state_data =
-        ServerState {
-            clients: HashMap::new(),
-            db_pool,
-        };
+    let state_data = ServerState {
+        clients: RwLock::new(HashMap::new()),
+        db_pool,
+    };
 
-
-    let state: SharedState =
-        Arc::new(
-            RwLock::new(state_data)
-        );
+    let state: SharedState = Arc::new(state_data);
 
 
     // ========================================================

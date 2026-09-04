@@ -1,791 +1,353 @@
 use chrono::Utc;
-
-use shared::{
-    Message,
-    UserId,
-    UserState,
-};
-
-use tokio::io::{
-    AsyncBufReadExt,
-    AsyncWriteExt,
-    BufReader,
-};
-
+use shared::{Message, UserId, UserState};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::analysis;
-use crate::auth::{
-    hash_password,
-    verify_password,
-};
-
+use crate::auth::{hash_password, verify_password};
 use crate::db;
-
-use crate::state::{
-    ClientData,
-    SharedState,
-};
-
+use crate::state::{ClientData, SharedState};
 
 // ============================================================
-// GESTIONE CLIENT
+// GESTIONE CLIENT CONNESSO
 // ============================================================
 
 pub async fn handle_client(
     mut socket: TcpStream,
     state: SharedState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-
-    let (read_half, mut write_half) =
-        socket.split();
-
-    let mut reader =
-        BufReader::new(read_half);
-
+    let (read_half, mut write_half) = socket.split();
+    let mut reader = BufReader::new(read_half);
     let mut line = String::new();
 
     let mut current_user_id: Option<UserId> = None;
 
-    let (tx, mut rx) =
-        mpsc::channel::<Message>(32);
-
+    // Canale per inoltrare al client i messaggi generati dal server (broadcast o diretti)
+    let (tx, mut rx) = mpsc::channel::<Message>(32);
 
     loop {
         line.clear();
 
         tokio::select! {
-
             // =================================================
-            // MESSAGGIO RICEVUTO DAL CLIENT
+            // 1. MESSAGGIO RICEVUTO DAL CLIENT
             // =================================================
-
             bytes_read = reader.read_line(&mut line) => {
-
                 let bytes_read = match bytes_read {
                     Ok(b) => b,
-
                     Err(e) => {
-                        eprintln!(
-                            "Errore lettura client: {}",
-                            e
-                        );
-
+                        eprintln!("Errore lettura client: {}", e);
                         break;
                     }
                 };
 
-
+                // Socket chiuso dal client
                 if bytes_read == 0 {
                     break;
                 }
 
-
-                let msg: Message =
-                    match serde_json::from_str(&line) {
-
-                        Ok(m) => m,
-
-                        Err(e) => {
-                            eprintln!(
-                                "Errore parsing JSON: {}",
-                                e
-                            );
-
-                            continue;
-                        }
-                    };
-
+                let msg: Message = match serde_json::from_str(&line) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("Errore parsing JSON: {}", e);
+                        continue;
+                    }
+                };
 
                 match msg {
-
                     // =========================================
                     // REGISTRAZIONE
                     // =========================================
-
-                    Message::RegisterRequest {
-                        username,
-                        password
-                    } => {
-
-                        let w_state =
-                            state.write().await;
-
-
-                        let hashed_password =
-                            match hash_password(&password) {
-
-                                Ok(h) => h,
-
-                                Err(e) => {
-                                    eprintln!(
-                                        "Errore hash password: {}",
-                                        e
-                                    );
-
-                                    continue;
-                                }
-                            };
-
-
-                        let new_id =
-                            uuid::Uuid::new_v4()
-                                .to_string();
-
-
-                        match db::register_user(
-                            &w_state.db_pool,
-                            &new_id,
-                            &username,
-                            &hashed_password,
-                        ) {
-
-                            Ok(true) => {
-
-                                let response =
-                                    Message::RegisterResponse {
-                                        success: true,
-
-                                        message:
-                                            "Registrazione completata"
-                                                .to_string(),
-                                    };
-
-
-                                let response_json =
-                                    serde_json::to_string(
-                                        &response
-                                    )? + "\n";
-
-
-                                if write_half
-                                    .write_all(
-                                        response_json.as_bytes()
-                                    )
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-
-
-                                println!(
-                                    "Nuovo utente registrato: {}",
-                                    username
-                                );
-                            }
-
-
-                            Ok(false) => {
-
-                                let response =
-                                    Message::RegisterResponse {
-                                        success: false,
-
-                                        message:
-                                            "Utente già esistente"
-                                                .to_string(),
-                                    };
-
-
-                                let response_json =
-                                    serde_json::to_string(
-                                        &response
-                                    )? + "\n";
-
-
-                                if write_half
-                                    .write_all(
-                                        response_json.as_bytes()
-                                    )
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
-                                }
-                            }
-
-
+                    Message::RegisterRequest { username, password } => {
+                        // ZERO LOCK SU `clients`!
+                        // La registrazione interagisce esclusivamente con il DB e calcola l'hash.
+                        let hashed_password = match hash_password(&password) {
+                            Ok(h) => h,
                             Err(e) => {
-                                eprintln!(
-                                    "Errore DB in registrazione: {}",
-                                    e
-                                );
+                                eprintln!("Errore hash password: {}", e);
+                                continue;
+                            }
+                        };
+
+                        let new_id = uuid::Uuid::new_v4().to_string();
+
+                        match db::register_user(&state.db_pool, &new_id, &username, &hashed_password) {
+                            Ok(true) => {
+                                let response = Message::RegisterResponse {
+                                    success: true,
+                                    message: "Registrazione completata".to_string(),
+                                };
+                                let response_json = serde_json::to_string(&response)? + "\n";
+
+                                // Await di rete eseguito SENZA trattenere alcun lock!
+                                if write_half.write_all(response_json.as_bytes()).await.is_err() {
+                                    break;
+                                }
+
+                                println!("Nuovo utente registrato: {}", username);
+                            }
+                            Ok(false) => {
+                                let response = Message::RegisterResponse {
+                                    success: false,
+                                    message: "Utente già esistente".to_string(),
+                                };
+                                let response_json = serde_json::to_string(&response)? + "\n";
+
+                                if write_half.write_all(response_json.as_bytes()).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Errore DB in registrazione: {}", e);
                             }
                         }
-                    },
-
+                    }
 
                     // =========================================
                     // LOGIN
                     // =========================================
-
-                    Message::LoginRequest {
-                        username,
-                        password
-                    } => {
-
-                        let mut w_state =
-                            state.write().await;
-
-
-                        let is_already_connected =
-                            w_state
-                                .clients
-                                .values()
-                                .any(|c| {
-                                    c.username == username
-                                        && c.state
-                                            != UserState::Disconnesso
-                                });
-
+                    Message::LoginRequest { username, password } => {
+                        // 1. Controllo duplicati con breve ReadLock su `clients`
+                        let is_already_connected = {
+                            let clients = state.clients.read().await;
+                            clients.values().any(|c| {
+                                c.username == username && c.state != UserState::Disconnesso
+                            })
+                        };
 
                         if is_already_connected {
+                            let response = Message::LoginResponse {
+                                success: false,
+                                user_id: None,
+                                message: "Utente già connesso su un altro dispositivo".to_string(),
+                            };
+                            let response_json = serde_json::to_string(&response)? + "\n";
 
-                            let response =
-                                Message::LoginResponse {
-                                    success: false,
-
-                                    user_id: None,
-
-                                    message:
-                                        "Utente già connesso su un altro dispositivo"
-                                            .to_string(),
-                                };
-
-
-                            let response_json =
-                                serde_json::to_string(
-                                    &response
-                                )? + "\n";
-
-
-                            if write_half
-                                .write_all(
-                                    response_json.as_bytes()
-                                )
-                                .await
-                                .is_err()
-                            {
+                            if write_half.write_all(response_json.as_bytes()).await.is_err() {
                                 break;
                             }
-
-
                             continue;
                         }
 
-
-                        match db::get_user_by_name(
-                            &w_state.db_pool,
-                            &username,
-                        ) {
-
+                        // 2. Query DB e verifica della password (CPU-bound Argon2) eseguite SENZA lock!
+                        match db::get_user_by_name(&state.db_pool, &username) {
                             Ok(Some((db_id, db_hash))) => {
+                                if verify_password(&password, &db_hash) {
+                                    current_user_id = Some(db_id.clone());
+                                    let now = Utc::now();
 
-                                if verify_password(
-                                    &password,
-                                    &db_hash,
-                                ) {
+                                    let client_data = ClientData {
+                                        username: username.clone(),
+                                        state: UserState::Fermo,
+                                        last_position: None,
+                                        last_move_time: None,
+                                        state_history: vec![(UserState::Fermo, now)],
+                                        distance_history: Vec::new(),
+                                        sender: tx.clone(),
+                                    };
 
-                                    current_user_id =
-                                        Some(db_id.clone());
-
-                                    let now =
-                                        Utc::now();
-
-
-                                    let client_data =
-                                        ClientData {
-                                            username:
-                                                username.clone(),
-
-                                            state:
-                                                UserState::Fermo,
-
-                                            last_position:
-                                                None,
-
-                                            last_move_time:
-                                                None,
-
-                                            state_history:
-                                                vec![(
-                                                    UserState::Fermo,
-                                                    now
-                                                )],
-
-                                            distance_history:
-                                                Vec::new(),
-
-                                            sender:
-                                                tx.clone(),
-                                        };
-
-
-                                    let _ =
-                                        db::insert_state(
-                                            &w_state.db_pool,
-                                            &db_id,
-                                            "Fermo",
-                                            now,
-                                        );
-
-
-                                    w_state
-                                        .clients
-                                        .insert(
-                                            db_id.clone(),
-                                            client_data,
-                                        );
-
-
-                                    let response =
-                                        Message::LoginResponse {
-                                            success: true,
-
-                                            user_id:
-                                                Some(
-                                                    db_id.clone()
-                                                ),
-
-                                            message:
-                                                format!(
-                                                    "Benvenuto {}",
-                                                    username
-                                                ),
-                                        };
-
-
-                                    let response_json =
-                                        serde_json::to_string(
-                                            &response
-                                        )? + "\n";
-
-
-                                    if write_half
-                                        .write_all(
-                                            response_json.as_bytes()
-                                        )
-                                        .await
-                                        .is_err()
+                                    // 3. Brevissimo WriteLock solo per inserire il client nella mappa in memoria
                                     {
+                                        let mut clients = state.clients.write().await;
+                                        clients.insert(db_id.clone(), client_data);
+                                    } // <-- LOCK RILASCIATO IMMEDIATAMENTE!
+
+                                    // 4. Scrittura stato iniziale nel DB (a lock rilasciato)
+                                    let _ = db::insert_state(&state.db_pool, &db_id, "Fermo", now);
+
+                                    // 5. Invio risposta al client via socket TCP (a lock rilasciato)
+                                    let response = Message::LoginResponse {
+                                        success: true,
+                                        user_id: Some(db_id.clone()),
+                                        message: format!("Benvenuto {}", username),
+                                    };
+                                    let response_json = serde_json::to_string(&response)? + "\n";
+
+                                    if write_half.write_all(response_json.as_bytes()).await.is_err() {
                                         break;
                                     }
 
-
-                                    println!(
-                                        "Utente {} autenticato.",
-                                        username
-                                    );
-
+                                    println!("Utente {} autenticato.", username);
                                 } else {
+                                    let response = Message::LoginResponse {
+                                        success: false,
+                                        user_id: None,
+                                        message: "Password errata".to_string(),
+                                    };
+                                    let response_json = serde_json::to_string(&response)? + "\n";
 
-                                    let response =
-                                        Message::LoginResponse {
-                                            success: false,
-
-                                            user_id: None,
-
-                                            message:
-                                                "Password errata"
-                                                    .to_string(),
-                                        };
-
-
-                                    let response_json =
-                                        serde_json::to_string(
-                                            &response
-                                        )? + "\n";
-
-
-                                    if write_half
-                                        .write_all(
-                                            response_json.as_bytes()
-                                        )
-                                        .await
-                                        .is_err()
-                                    {
+                                    if write_half.write_all(response_json.as_bytes()).await.is_err() {
                                         break;
                                     }
                                 }
                             }
-
-
                             Ok(None) => {
+                                let response = Message::LoginResponse {
+                                    success: false,
+                                    user_id: None,
+                                    message: "Utente non trovato".to_string(),
+                                };
+                                let response_json = serde_json::to_string(&response)? + "\n";
 
-                                let response =
-                                    Message::LoginResponse {
-                                        success: false,
-
-                                        user_id: None,
-
-                                        message:
-                                            "Utente non trovato"
-                                                .to_string(),
-                                    };
-
-
-                                let response_json =
-                                    serde_json::to_string(
-                                        &response
-                                    )? + "\n";
-
-
-                                if write_half
-                                    .write_all(
-                                        response_json.as_bytes()
-                                    )
-                                    .await
-                                    .is_err()
-                                {
+                                if write_half.write_all(response_json.as_bytes()).await.is_err() {
                                     break;
                                 }
                             }
-
-
                             Err(e) => {
-                                eprintln!(
-                                    "Errore DB in login: {}",
-                                    e
-                                );
+                                eprintln!("Errore DB in login: {}", e);
                             }
                         }
-                    },
-
+                    }
 
                     // =========================================
                     // LOGOUT
                     // =========================================
+                    Message::LogoutRequest { user_id } => {
+                        if current_user_id.as_ref() == Some(&user_id) {
+                            // 1. Rimuoviamo il client dalla memoria con un breve WriteLock
+                            let removed_username = {
+                                let mut clients = state.clients.write().await;
+                                clients.remove(&user_id).map(|c| c.username)
+                            };
 
-                    Message::LogoutRequest {
-                        user_id
-                    } => {
+                            let username = removed_username.unwrap_or_else(|| user_id.clone());
 
-                        if current_user_id.as_ref()
-                            == Some(&user_id)
-                        {
-                            let mut w_state =
-                                state.write().await;
+                            // 2. Registriamo il logout nel DB e inviamo la risposta a lock rilasciato
+                            let _ = db::insert_state(&state.db_pool, &user_id, "Disconnesso", Utc::now());
 
+                            let response = Message::LogoutResponse {
+                                success: true,
+                                message: "Logout effettuato con successo".to_string(),
+                            };
+                            let response_json = serde_json::to_string(&response)? + "\n";
 
-                            let username =
-                                if let Some(client) =
-                                    w_state
-                                        .clients
-                                        .remove(&user_id)
-                                {
-                                    let now =
-                                        Utc::now();
+                            let _ = write_half.write_all(response_json.as_bytes()).await;
 
-
-                                    let _ =
-                                        db::insert_state(
-                                            &w_state.db_pool,
-                                            &user_id,
-                                            "Disconnesso",
-                                            now,
-                                        );
-
-
-                                    client.username
-
-                                } else {
-                                    user_id.clone()
-                                };
-
-
-                            let response =
-                                Message::LogoutResponse {
-                                    success: true,
-
-                                    message:
-                                        "Logout effettuato con successo"
-                                            .to_string(),
-                                };
-
-
-                            let response_json =
-                                serde_json::to_string(
-                                    &response
-                                )? + "\n";
-
-
-                            let _ =
-                                write_half
-                                    .write_all(
-                                        response_json.as_bytes()
-                                    )
-                                    .await;
-
-
-                            println!(
-                                "Utente {} ha effettuato il logout",
-                                username
-                            );
-
-
+                            println!("Utente {} ha effettuato il logout", username);
                             current_user_id = None;
-
                         } else {
+                            let response = Message::LogoutResponse {
+                                success: false,
+                                message: "Utente non autorizzato al logout".to_string(),
+                            };
+                            let response_json = serde_json::to_string(&response)? + "\n";
 
-                            let response =
-                                Message::LogoutResponse {
-                                    success: false,
-
-                                    message:
-                                        "Utente non autorizzato al logout"
-                                            .to_string(),
-                                };
-
-
-                            let response_json =
-                                serde_json::to_string(
-                                    &response
-                                )? + "\n";
-
-
-                            let _ =
-                                write_half
-                                    .write_all(
-                                        response_json.as_bytes()
-                                    )
-                                    .await;
+                            let _ = write_half.write_all(response_json.as_bytes()).await;
                         }
-                    },
-
+                    }
 
                     // =========================================
-                    // AGGIORNAMENTO POSIZIONE
+                    // AGGIORNAMENTO POSIZIONE GPS
                     // =========================================
+                    Message::PositionUpdate { user_id, coords, timestamp } => {
+                        if Some(user_id.clone()) == current_user_id {
+                            // 1. Aggiorniamo coordinate, calcoliamo distanza e verifichiamo cambi di stato
+                            // all'interno di un breve WriteLock, estraendo i dati da persistere.
+                            let db_actions = {
+                                let mut clients = state.clients.write().await;
+                                if let Some(client) = clients.get_mut(&user_id) {
+                                    if let Some(last_pos) = &client.last_position {
+                                        let dist = analysis::calculate_distance(last_pos, &coords);
+                                        client.distance_history.push((dist, timestamp));
 
-                    Message::PositionUpdate {
-                        user_id,
-                        coords,
-                        timestamp
-                    } => {
-
-                        if Some(user_id.clone())
-                            == current_user_id
-                        {
-                            let mut w_state =
-                                state.write().await;
-
-
-                            let pool =
-                                w_state
-                                    .db_pool
-                                    .clone();
-
-
-                            if let Some(client) =
-                                w_state
-                                    .clients
-                                    .get_mut(&user_id)
-                            {
-
-                                if let Some(last_pos) =
-                                    &client.last_position
-                                {
-
-                                    let dist =
-                                        analysis::calculate_distance(
-                                            last_pos,
-                                            &coords,
-                                        );
-
-
-                                    client
-                                        .distance_history
-                                        .push((
-                                            dist,
-                                            timestamp
-                                        ));
-
-
-                                    let _ =
-                                        db::insert_distance(
-                                            &pool,
-                                            &user_id,
-                                            dist,
-                                            timestamp,
-                                        );
-
-
-                                    if dist > 0.001 {
-
-                                        if client.state
-                                            != UserState::InMovimento
-                                        {
-                                            client.state =
-                                                UserState::InMovimento;
-
-
-                                            client
-                                                .state_history
-                                                .push((
-                                                    UserState::InMovimento,
-                                                    timestamp
-                                                ));
-
-
-                                            let _ =
-                                                db::insert_state(
-                                                    &pool,
-                                                    &user_id,
-                                                    "In Movimento",
-                                                    timestamp,
-                                                );
+                                        let mut state_changed = false;
+                                        if dist > 0.001 {
+                                            if client.state != UserState::InMovimento {
+                                                client.state = UserState::InMovimento;
+                                                client.state_history.push((UserState::InMovimento, timestamp));
+                                                state_changed = true;
+                                            }
+                                            client.last_move_time = Some(timestamp);
                                         }
 
-
-                                        client.last_move_time =
-                                            Some(timestamp);
+                                        client.last_position = Some(coords.clone());
+                                        Some((dist, state_changed))
+                                    } else {
+                                        // Prima posizione registrata
+                                        client.last_move_time = Some(timestamp);
+                                        client.last_position = Some(coords.clone());
+                                        None
                                     }
-
                                 } else {
-
-                                    // Prima posizione
-                                    client.last_move_time =
-                                        Some(timestamp);
+                                    None
                                 }
+                            }; // <-- IL WRITE LOCK VIENE RILASCIATO SUBITO QUI!
 
-
-                                client.last_position =
-                                    Some(coords.clone());
+                            // 2. Le query di persistenza su SQLite avvengono a lock rilasciato
+                            if let Some((dist, state_changed)) = db_actions {
+                                let _ = db::insert_distance(&state.db_pool, &user_id, dist, timestamp);
+                                if state_changed {
+                                    let _ = db::insert_state(&state.db_pool, &user_id, "In Movimento", timestamp);
+                                }
                             }
                         }
-                    },
-
+                    }
 
                     // =========================================
                     // MESSAGGIO CLIENT -> SERVER
                     // =========================================
-
-                    Message::ClientToServerText {
-                        user_id,
-                        content
-                    } => {
-
-                        let w_state =
-                            state.write().await;
-
-
-                        let sender_name =
-                            w_state
-                                .clients
+                    Message::ClientToServerText { user_id, content } => {
+                        // 1. Breve ReadLock per ricavare lo username del mittente (NO WriteLock!)
+                        let sender_name = {
+                            let clients = state.clients.read().await;
+                            clients
                                 .get(&user_id)
-                                .map(|c| {
-                                    c.username.clone()
-                                })
-                                .unwrap_or_else(|| {
-                                    user_id.clone()
-                                });
+                                .map(|c| c.username.clone())
+                                .unwrap_or_else(|| user_id.clone())
+                        };
 
-
-                        let _ =
-                            db::insert_chat(
-                                &w_state.db_pool,
-                                &user_id,
-                                Some("Server"),
-                                &content,
-                                Utc::now(),
-                            );
-
-
-                        println!(
-                            "[Messaggio da {}]: {}",
-                            sender_name,
-                            content
+                        // 2. Salvataggio su database a lock rilasciato
+                        let _ = db::insert_chat(
+                            &state.db_pool,
+                            &user_id,
+                            Some("Server"),
+                            &content,
+                            Utc::now(),
                         );
-                    },
 
+                        println!("[Messaggio da {}]: {}", sender_name, content);
+                    }
 
                     _ => {}
                 }
             }
 
-
             // =================================================
-            // MESSAGGIO SERVER -> CLIENT
+            // 2. MESSAGGIO SERVER -> CLIENT (Inoltro da channel)
             // =================================================
-
             Some(out_msg) = rx.recv() => {
-
-                let json =
-                    serde_json::to_string(
-                        &out_msg
-                    )? + "\n";
-
-
-                if write_half
-                    .write_all(
-                        json.as_bytes()
-                    )
-                    .await
-                    .is_err()
-                {
+                let json = serde_json::to_string(&out_msg)? + "\n";
+                if write_half.write_all(json.as_bytes()).await.is_err() {
                     break;
                 }
             }
         }
     }
 
-
     // =========================================================
-    // DISCONNESSIONE IMPREVISTA
+    // DISCONNESSIONE IMPREVISTA / FINE STREAM
     // =========================================================
-
     if let Some(user_id) = current_user_id {
+        let username = {
+            let mut clients = state.clients.write().await;
+            if let Some(client) = clients.get_mut(&user_id) {
+                client.state = UserState::Disconnesso;
+                let now = Utc::now();
+                client.state_history.push((UserState::Disconnesso, now));
+                Some(client.username.clone())
+            } else {
+                None
+            }
+        };
 
-        let mut w_state =
-            state.write().await;
+        // Scrittura dello stato disconnesso nel DB a lock rilasciato
+        let _ = db::insert_state(&state.db_pool, &user_id, "Disconnesso", Utc::now());
 
-
-        let pool =
-            w_state
-                .db_pool
-                .clone();
-
-
-        if let Some(client) =
-            w_state
-                .clients
-                .get_mut(&user_id)
-        {
-
-            client.state =
-                UserState::Disconnesso;
-
-
-            let now =
-                Utc::now();
-
-
-            client
-                .state_history
-                .push((
-                    UserState::Disconnesso,
-                    now,
-                ));
-
-
-            let _ =
-                db::insert_state(
-                    &pool,
-                    &user_id,
-                    "Disconnesso",
-                    now,
-                );
-
-
-            println!(
-                "Utente {} disconnesso.",
-                client.username
-            );
+        if let Some(name) = username {
+            println!("Utente {} disconnesso.", name);
         }
     }
-
 
     Ok(())
 }
