@@ -103,3 +103,38 @@ pub fn analyze_movement(
         pause_time_secs,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    #[test]
+    fn test_analyze_movement_with_prior_state() {
+        // Intervallo: oggi dalle 00:00:00 alle 02:00:00
+        let start = Utc.with_ymd_and_hms(2026, 9, 4, 0, 0, 0).unwrap();
+        let end = Utc.with_ymd_and_hms(2026, 9, 4, 2, 0, 0).unwrap();
+
+        // L'utente era Fermo da ieri alle 23:00
+        // Alle 01:00 inizia a muoversi
+        // Alle 02:00 si ferma
+        let states = vec![
+            (UserState::Fermo, start - Duration::hours(1)), // ieri 23:00
+            (UserState::InMovimento, start + Duration::hours(1)), // oggi 01:00
+            (UserState::Fermo, start + Duration::hours(2)), // oggi 02:00
+        ];
+
+        let distances = vec![
+            (10.0, start + Duration::hours(1) + Duration::minutes(30)), // 10 km percorsi
+        ];
+
+        let result = analyze_movement(&states, &distances, start, end);
+
+        // Dalle 00:00 alle 01:00 (1 ora = 3600 sec) era Fermo
+        assert_eq!(result.pause_time_secs, 3600);
+        // Dalle 01:00 alle 02:00 (1 ora = 3600 sec) era InMovimento
+        assert_eq!(result.moving_time_secs, 3600);
+        assert_eq!(result.total_distance_km, 10.0);
+        assert!((result.average_speed_kmh - 10.0).abs() < 0.01);
+    }
+}

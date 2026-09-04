@@ -129,6 +129,37 @@ async fn handle_broadcast(text: &str, state: &SharedState) {
 // STATISTICHE
 // ============================================================
 
+pub fn calculate_interval_bounds(
+    interval: &str,
+    end_time: chrono::DateTime<Utc>,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    let start_time = match interval {
+        // Giorno corrente: da oggi alle ore 00:00:00 UTC a ora
+        "giorno" => Utc
+            .with_ymd_and_hms(end_time.year(), end_time.month(), end_time.day(), 0, 0, 0)
+            .unwrap(),
+
+        // Settimana corrente: da lunedì della settimana in corso alle ore 00:00:00 UTC a ora
+        "settimana" => {
+            let days_from_monday = end_time.weekday().num_days_from_monday();
+            let start_of_today = Utc
+                .with_ymd_and_hms(end_time.year(), end_time.month(), end_time.day(), 0, 0, 0)
+                .unwrap();
+            start_of_today - chrono::Duration::days(days_from_monday as i64)
+        }
+
+        // Mese corrente: dal giorno 1 del mese alle ore 00:00:00 UTC a ora
+        "mese" => Utc
+            .with_ymd_and_hms(end_time.year(), end_time.month(), 1, 0, 0, 0)
+            .unwrap(),
+
+        // Tutto lo storico: dall'inizio dei tempi a ora
+        _ => chrono::DateTime::<Utc>::MIN_UTC,
+    };
+
+    (start_time, end_time)
+}
+
 async fn handle_stats(text: &str, state: &SharedState) {
     let parts: Vec<&str> = text.split_whitespace().collect();
 
@@ -148,15 +179,7 @@ async fn handle_stats(text: &str, state: &SharedState) {
         return;
     }
 
-    let end_time = Utc::now();
-    let start_time = match interval {
-        "giorno" => end_time - chrono::Duration::days(1),
-        "settimana" => end_time - chrono::Duration::weeks(1),
-        "mese" => Utc
-            .with_ymd_and_hms(end_time.year(), end_time.month(), 1, 0, 0, 0)
-            .unwrap(),
-        _ => chrono::DateTime::<Utc>::MIN_UTC,
-    };
+    let (start_time, end_time) = calculate_interval_bounds(interval, Utc::now());
 
     // 1. Query SQLite e calcoli analitici eseguiti direttamente su db_pool SENZA alcun lock su `clients`!
     match db::get_user_by_name(&state.db_pool, target_name) {
@@ -181,6 +204,16 @@ async fn handle_stats(text: &str, state: &SharedState) {
                     };
 
                     println!("=== STATISTICHE: {} (Intervallo: {}) ===", target_name, interval);
+                    let start_str = if start_time == chrono::DateTime::<Utc>::MIN_UTC {
+                        "Inizio storico".to_string()
+                    } else {
+                        start_time.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                    };
+                    println!(
+                        "Periodo: da {} a {}",
+                        start_str,
+                        end_time.format("%Y-%m-%d %H:%M:%S UTC")
+                    );
                     println!("Stato Attuale: {}", state_str);
                     println!("Distanza Totale: {:.2} km", result.total_distance_km);
                     println!("Velocita Media: {:.2} km/h", result.average_speed_kmh);
@@ -283,4 +316,59 @@ fn print_help() {
     println!("  /stats <utente> <int.> : Mostra le statistiche (all, giorno, settimana, mese)");
     println!("  /chat <utente>         : Mostra lo storico dei messaggi con un utente");
     println!("---------------------------");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn test_calculate_interval_bounds_giorno() {
+        // Venerdì 4 Settembre 2026 alle 19:15:30 UTC
+        let now = Utc.with_ymd_and_hms(2026, 9, 4, 19, 15, 30).unwrap();
+        let (start, end) = calculate_interval_bounds("giorno", now);
+
+        assert_eq!(start, Utc.with_ymd_and_hms(2026, 9, 4, 0, 0, 0).unwrap());
+        assert_eq!(end, now);
+    }
+
+    #[test]
+    fn test_calculate_interval_bounds_settimana() {
+        // Venerdì 4 Settembre 2026 alle 19:15:30 UTC -> Lunedì era il 31 Agosto 2026
+        let now = Utc.with_ymd_and_hms(2026, 9, 4, 19, 15, 30).unwrap();
+        let (start, end) = calculate_interval_bounds("settimana", now);
+
+        assert_eq!(start, Utc.with_ymd_and_hms(2026, 8, 31, 0, 0, 0).unwrap());
+        assert_eq!(end, now);
+
+        // Domenica 6 Settembre 2026 -> Lunedì deve essere sempre il 31 Agosto 2026
+        let sunday = Utc.with_ymd_and_hms(2026, 9, 6, 23, 0, 0).unwrap();
+        let (start_sun, _) = calculate_interval_bounds("settimana", sunday);
+        assert_eq!(start_sun, Utc.with_ymd_and_hms(2026, 8, 31, 0, 0, 0).unwrap());
+
+        // Lunedì 31 Agosto 2026 alle 10:00 -> Lunedì 31 Agosto 00:00:00
+        let monday = Utc.with_ymd_and_hms(2026, 8, 31, 10, 0, 0).unwrap();
+        let (start_mon, _) = calculate_interval_bounds("settimana", monday);
+        assert_eq!(start_mon, Utc.with_ymd_and_hms(2026, 8, 31, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn test_calculate_interval_bounds_mese() {
+        // Venerdì 4 Settembre 2026 -> 1 Settembre 2026 00:00:00
+        let now = Utc.with_ymd_and_hms(2026, 9, 4, 19, 15, 30).unwrap();
+        let (start, end) = calculate_interval_bounds("mese", now);
+
+        assert_eq!(start, Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap());
+        assert_eq!(end, now);
+    }
+
+    #[test]
+    fn test_calculate_interval_bounds_all() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 4, 19, 15, 30).unwrap();
+        let (start, end) = calculate_interval_bounds("all", now);
+
+        assert_eq!(start, chrono::DateTime::<Utc>::MIN_UTC);
+        assert_eq!(end, now);
+    }
 }

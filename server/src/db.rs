@@ -129,6 +129,28 @@ pub fn get_user_history(
         states.push((state, ts));
     }
 
+    // Se non abbiamo uno stato registrato a o prima di `start` (oppure `states` è vuoto),
+    // recuperiamo l'ultimo stato registrato prima di `start` per conoscere lo stato dell'utente
+    // all'inizio dell'intervallo temporale considerato.
+    let needs_prior_state = states.first().map(|(_, ts)| *ts > start).unwrap_or(true);
+    if needs_prior_state {
+        let mut prior_stmt = conn.prepare(
+            "SELECT state, timestamp FROM states WHERE user_id = ?1 AND timestamp < ?2 ORDER BY timestamp DESC LIMIT 1"
+        )?;
+        let mut prior_rows = prior_stmt.query(rusqlite::params![user_id, start.to_rfc3339()])?;
+        if let Some(row) = prior_rows.next()? {
+            let state_str: String = row.get(0)?;
+            let ts_str: String = row.get(1)?;
+            let ts = chrono::DateTime::parse_from_rfc3339(&ts_str).unwrap().with_timezone(&chrono::Utc);
+            let state = match state_str.as_str() {
+                "In Movimento" => shared::UserState::InMovimento,
+                "Disconnesso" | "Sconnesso" | "Disconnected" => shared::UserState::Disconnesso,
+                _ => shared::UserState::Fermo,
+            };
+            states.insert(0, (state, ts));
+        }
+    }
+
     let mut distances = Vec::new();
     let mut stmt2 = conn.prepare("SELECT distance, timestamp FROM distances WHERE user_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3 ORDER BY timestamp ASC")?;
     let mut rows2 = stmt2.query(rusqlite::params![user_id, start.to_rfc3339(), end.to_rfc3339()])?;
