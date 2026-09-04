@@ -113,11 +113,11 @@ Questo documento descrive dettagliatamente la riprogettazione della concorrenza 
 
 #### 2. Login (`Message::LoginRequest`)
 - **Prima**: Tutto il blocco era coperto da un gigantesco WriteLock.
-- **Dopo**:
-  1. Controllo duplicati: brevissimo `state.clients.read().await`.
-  2. Verifica hash Argon2 e query SQLite su `state.db_pool`: **nessun lock**.
-  3. Registrazione del client: WriteLock limitato alla sola istruzione `clients.insert(...)`.
-  4. Scrittura stato nel DB e invio risposta di rete TCP: **a lock rilasciato**.
+- **Dopo (Pattern Double-Checked Locking)**:
+  1. *Filtro rapido iniziale*: brevissimo `state.clients.read().await` per scartare subito richieste duplicate senza sprecare cicli di CPU in hashing.
+  2. *Calcolo pesante*: verifica hash Argon2 e query SQLite su `state.db_pool` eseguite con **zero lock su `clients`**.
+  3. *Controllo atomico definitivo e inserimento*: WriteLock minimale che riesegue il controllo duplicati (`values().any(...)`). Se due login per lo stesso utente sono avvenuti in parallelo, solo il primo inserisce con successo, mentre il secondo rileva il conflitto atomico e viene respinto.
+  4. *Operazioni successive*: scrittura stato nel DB e invio risposta di rete TCP **a lock rilasciato**.
 
 #### 3. Aggiornamento Posizione GPS (`Message::PositionUpdate`)
 - **Prima**: WriteLock mantenuto durante il calcolo e le chiamate di persistenza `db::insert_distance` e `db::insert_state`.

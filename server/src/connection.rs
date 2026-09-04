@@ -134,7 +134,6 @@ pub async fn handle_client(
                         match db::get_user_by_name(&state.db_pool, &username) {
                             Ok(Some((db_id, db_hash))) => {
                                 if verify_password(&password, &db_hash) {
-                                    current_user_id = Some(db_id.clone());
                                     let now = Utc::now();
 
                                     let client_data = ClientData {
@@ -147,11 +146,34 @@ pub async fn handle_client(
                                         sender: tx.clone(),
                                     };
 
-                                    // 3. Brevissimo WriteLock solo per inserire il client nella mappa in memoria
-                                    {
+                                    // 3. Controllo atomico definitivo (Double-Checked Locking) e inserimento nel WriteLock
+                                    let login_conflict = {
                                         let mut clients = state.clients.write().await;
-                                        clients.insert(db_id.clone(), client_data);
-                                    } // <-- LOCK RILASCIATO IMMEDIATAMENTE!
+                                        if clients.values().any(|c| {
+                                            c.username == username && c.state != UserState::Disconnesso
+                                        }) {
+                                            true
+                                        } else {
+                                            clients.insert(db_id.clone(), client_data);
+                                            false
+                                        }
+                                    }; // <-- LOCK RILASCIATO IMMEDIATAMENTE!
+
+                                    if login_conflict {
+                                        let response = Message::LoginResponse {
+                                            success: false,
+                                            user_id: None,
+                                            message: "Utente già connesso su un altro dispositivo".to_string(),
+                                        };
+                                        let response_json = serde_json::to_string(&response)? + "\n";
+
+                                        if write_half.write_all(response_json.as_bytes()).await.is_err() {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+
+                                    current_user_id = Some(db_id.clone());
 
                                     // 4. Scrittura stato iniziale nel DB (a lock rilasciato)
                                     let _ = db::insert_state(&state.db_pool, &db_id, "Fermo", now);
