@@ -62,7 +62,8 @@ pub async fn handle_client(
                     Message::RegisterRequest { username, password } => {
                         // ZERO LOCK SU `clients`!
                         // La registrazione interagisce esclusivamente con il DB e calcola l'hash.
-                        let hashed_password = match hash_password(&password) {
+                        // Entrambe le operazioni sono asincrone e non bloccano il worker thread Tokio.
+                        let hashed_password = match hash_password(&password).await {
                             Ok(h) => h,
                             Err(e) => {
                                 eprintln!("Errore hash password: {}", e);
@@ -72,7 +73,7 @@ pub async fn handle_client(
 
                         let new_id = uuid::Uuid::new_v4().to_string();
 
-                        match db::register_user(&state.db_pool, &new_id, &username, &hashed_password) {
+                        match db::register_user(&state.db_pool, &new_id, &username, &hashed_password).await {
                             Ok(true) => {
                                 let response = Message::RegisterResponse {
                                     success: true,
@@ -130,10 +131,10 @@ pub async fn handle_client(
                             continue;
                         }
 
-                        // 2. Query DB e verifica della password (CPU-bound Argon2) eseguite SENZA lock!
-                        match db::get_user_by_name(&state.db_pool, &username) {
+                        // 2. Query DB e verifica della password (CPU-bound Argon2) eseguite in background (spawn_blocking) SENZA lock!
+                        match db::get_user_by_name(&state.db_pool, &username).await {
                             Ok(Some((db_id, db_hash))) => {
-                                if verify_password(&password, &db_hash) {
+                                if verify_password(&password, &db_hash).await {
                                     let now = Utc::now();
 
                                     let client_data = ClientData {
@@ -150,7 +151,7 @@ pub async fn handle_client(
                                     let login_conflict = {
                                         let mut clients = state.clients.write().await;
                                         if clients.values().any(|c| {
-                                            c.username == username && c.state != UserState::Disconnesso
+                                             c.username == username && c.state != UserState::Disconnesso
                                         }) {
                                             true
                                         } else {
@@ -175,8 +176,8 @@ pub async fn handle_client(
 
                                     current_user_id = Some(db_id.clone());
 
-                                    // 4. Scrittura stato iniziale nel DB (a lock rilasciato)
-                                    let _ = db::insert_state(&state.db_pool, &db_id, "Fermo", now);
+                                    // 4. Scrittura stato iniziale nel DB in background (a lock rilasciato)
+                                    let _ = db::insert_state(&state.db_pool, &db_id, "Fermo", now).await;
 
                                     // 5. Invio risposta al client via socket TCP (a lock rilasciato)
                                     let response = Message::LoginResponse {
@@ -236,7 +237,7 @@ pub async fn handle_client(
                             let username = removed_username.unwrap_or_else(|| user_id.clone());
 
                             // 2. Registriamo il logout nel DB e inviamo la risposta a lock rilasciato
-                            let _ = db::insert_state(&state.db_pool, &user_id, "Disconnesso", Utc::now());
+                            let _ = db::insert_state(&state.db_pool, &user_id, "Disconnesso", Utc::now()).await;
 
                             let response = Message::LogoutResponse {
                                 success: true,
@@ -296,11 +297,11 @@ pub async fn handle_client(
                                 }
                             }; // <-- IL WRITE LOCK VIENE RILASCIATO SUBITO QUI!
 
-                            // 2. Le query di persistenza su SQLite avvengono a lock rilasciato
+                            // 2. Le query di persistenza su SQLite avvengono a lock rilasciato in background
                             if let Some((dist, state_changed)) = db_actions {
-                                let _ = db::insert_distance(&state.db_pool, &user_id, dist, timestamp);
+                                let _ = db::insert_distance(&state.db_pool, &user_id, dist, timestamp).await;
                                 if state_changed {
-                                    let _ = db::insert_state(&state.db_pool, &user_id, "In Movimento", timestamp);
+                                    let _ = db::insert_state(&state.db_pool, &user_id, "In Movimento", timestamp).await;
                                 }
                             }
                         }
@@ -319,14 +320,14 @@ pub async fn handle_client(
                                 .unwrap_or_else(|| user_id.clone())
                         };
 
-                        // 2. Salvataggio su database a lock rilasciato
+                        // 2. Salvataggio su database a lock rilasciato in background
                         let _ = db::insert_chat(
                             &state.db_pool,
                             &user_id,
                             Some("Server"),
                             &content,
                             Utc::now(),
-                        );
+                        ).await;
 
                         println!("[Messaggio da {}]: {}", sender_name, content);
                     }
@@ -363,8 +364,8 @@ pub async fn handle_client(
             }
         };
 
-        // Scrittura dello stato disconnesso nel DB a lock rilasciato
-        let _ = db::insert_state(&state.db_pool, &user_id, "Disconnesso", Utc::now());
+        // Scrittura dello stato disconnesso nel DB a lock rilasciato in background
+        let _ = db::insert_state(&state.db_pool, &user_id, "Disconnesso", Utc::now()).await;
 
         if let Some(name) = username {
             println!("Utente {} disconnesso.", name);

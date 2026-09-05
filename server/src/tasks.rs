@@ -1,8 +1,8 @@
 use chrono::Utc;
 use shared::{UserId, UserState};
 
-use std::fs::OpenOptions;
-use std::io::Write;
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
 
 use sysinfo::{get_current_pid, ProcessExt, System, SystemExt};
 
@@ -43,10 +43,10 @@ pub async fn state_monitor_task(state: SharedState) {
             to_update
         }; // <-- IL WRITE LOCK SU `clients` VIENE RILASCIATO IMMEDIATAMENTE QUI!
 
-        // 2. Le scritture su disco nel database SQLite avvengono SENZA trattenere il lock dei client,
-        // garantendo che nessun'altra connessione o comando rimanga bloccato durante le operazioni I/O.
+        // 2. Le scritture su disco nel database SQLite avvengono in background tramite spawn_blocking
+        // SENZA trattenere il lock dei client e SENZA bloccare il worker thread di Tokio.
         for user_id in users_to_persist {
-            let _ = db::insert_state(&state.db_pool, &user_id, "Fermo", now);
+            let _ = db::insert_state(&state.db_pool, &user_id, "Fermo", now).await;
         }
     }
 }
@@ -80,6 +80,7 @@ pub async fn cpu_logger_task() {
             .create(true)
             .append(true)
             .open("cpu_log.txt")
+            .await
         {
             let log_line = format!(
                 "[{}] Server Process CPU Usage: {:.2}%\n",
@@ -87,7 +88,7 @@ pub async fn cpu_logger_task() {
                 cpu_usage
             );
 
-            let _ = file.write_all(log_line.as_bytes());
+            let _ = file.write_all(log_line.as_bytes()).await;
         }
     }
 }

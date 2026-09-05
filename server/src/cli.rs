@@ -90,7 +90,7 @@ async fn handle_private_message(text: &str, state: &SharedState) {
             Some(&target_uid),
             msg_content,
             Utc::now(),
-        );
+        ).await;
 
         println!("Messaggio privato inviato a {}", target_name);
     } else {
@@ -181,10 +181,10 @@ async fn handle_stats(text: &str, state: &SharedState) {
 
     let (start_time, end_time) = calculate_interval_bounds(interval, Utc::now());
 
-    // 1. Query SQLite e calcoli analitici eseguiti direttamente su db_pool SENZA alcun lock su `clients`!
-    match db::get_user_by_name(&state.db_pool, target_name) {
+    // 1. Query SQLite e calcoli analitici eseguiti direttamente su db_pool in background SENZA alcun lock su `clients`!
+    match db::get_user_by_name(&state.db_pool, target_name).await {
         Ok(Some((uid, _))) => {
-            match db::get_user_history(&state.db_pool, &uid, start_time, end_time) {
+            match db::get_user_history(&state.db_pool, &uid, start_time, end_time).await {
                 Ok((states, distances)) => {
                     let result =
                         analysis::analyze_movement(&states, &distances, start_time, end_time);
@@ -263,10 +263,10 @@ async fn handle_chat(text: &str, state: &SharedState) {
     let target_name = parts[1];
 
     // ZERO LOCK SU `clients`!
-    // Le query al database accedono direttamente al db_pool che è già thread-safe.
-    match db::get_user_by_name(&state.db_pool, target_name) {
+    // Le query al database accedono direttamente al db_pool in background tramite spawn_blocking.
+    match db::get_user_by_name(&state.db_pool, target_name).await {
         Ok(Some((uid, _))) => {
-            match db::get_chat_history(&state.db_pool, &uid) {
+            match db::get_chat_history(&state.db_pool, &uid).await {
                 Ok(chats) => {
                     println!("=== STORICO CHAT con {} ===", target_name);
 
