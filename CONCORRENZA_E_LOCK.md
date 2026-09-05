@@ -119,8 +119,10 @@ Questo documento descrive dettagliatamente la riprogettazione della concorrenza 
   2. *Query e Calcolo CPU*: `db::get_user_by_name(&state.db_pool, ...).await` e `auth::verify_password(&password, &hash).await` eseguiti in background senza trattenere lock.
   3. *Inserimento atomico*: breve `state.clients.write().await` per inserire la sessione verificando che nel frattempo non sia subentrato un conflitto atomico.
   4. *Persistenza e Risposta*: `db::insert_state(...).await` e invio su socket di rete TCP eseguiti a lock rilasciato.
-- **GPS, Chat e Logout**:
+- **GPS, Chat, Logout e Disconnessione Imprevista**:
   - Tutta la memoria volatile viene aggiornata in scope protetti microscopici.
+  - Sia nel logout volontario sia nella disconnessione imprevista (caduta della socket TCP), il client viene rimosso definitivamente dalla memoria con `clients.remove(&user_id)`. In questo modo la mappa contiene **solo ed esclusivamente client attivi**: non si creano leak di memoria e si evitano "client zombie" con `mpsc::Sender` morti durante broadcast o messaggi diretti.
+  - Lo stato `"Disconnesso"` viene salvato persistentemente su SQLite a lock rilasciato in background.
   - Tutte le scritture `insert_distance`, `insert_state`, `insert_chat` avvengono a lock rilasciato con chiamate asincrone `.await`.
 
 ---

@@ -112,9 +112,7 @@ pub async fn handle_client(
                         // 1. Controllo duplicati con breve ReadLock su `clients`
                         let is_already_connected = {
                             let clients = state.clients.read().await;
-                            clients.values().any(|c| {
-                                c.username == username && c.state != UserState::Disconnesso
-                            })
+                            clients.values().any(|c| c.username == username)
                         };
 
                         if is_already_connected {
@@ -150,9 +148,7 @@ pub async fn handle_client(
                                     // 3. Controllo atomico definitivo (Double-Checked Locking) e inserimento nel WriteLock
                                     let login_conflict = {
                                         let mut clients = state.clients.write().await;
-                                        if clients.values().any(|c| {
-                                             c.username == username && c.state != UserState::Disconnesso
-                                        }) {
+                                        if clients.values().any(|c| c.username == username) {
                                             true
                                         } else {
                                             clients.insert(db_id.clone(), client_data);
@@ -352,16 +348,10 @@ pub async fn handle_client(
     // DISCONNESSIONE IMPREVISTA / FINE STREAM
     // =========================================================
     if let Some(user_id) = current_user_id {
+        // Rimuoviamo il client dalla memoria attiva per non lasciare zombie e canali morti
         let username = {
             let mut clients = state.clients.write().await;
-            if let Some(client) = clients.get_mut(&user_id) {
-                client.state = UserState::Disconnesso;
-                let now = Utc::now();
-                client.state_history.push((UserState::Disconnesso, now));
-                Some(client.username.clone())
-            } else {
-                None
-            }
+            clients.remove(&user_id).map(|c| c.username)
         };
 
         // Scrittura dello stato disconnesso nel DB a lock rilasciato in background
