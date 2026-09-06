@@ -18,8 +18,6 @@ pub struct ClientData {
     pub state: UserState,
     pub last_position: Option<Coordinates>,
     pub last_move_time: Option<DateTime<Utc>>,
-    pub state_history: Vec<(UserState, DateTime<Utc>)>,
-    pub distance_history: Vec<(f64, DateTime<Utc>)>,
     pub sender: mpsc::Sender<Message>,
 }
 

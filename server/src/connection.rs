@@ -141,8 +141,6 @@ pub async fn handle_client(
                                                 state: UserState::Fermo,
                                                 last_position: None,
                                                 last_move_time: None,
-                                                state_history: vec![(UserState::Fermo, now)],
-                                                distance_history: Vec::new(),
                                                 sender: tx.clone(),
                                             };
 
@@ -269,13 +267,11 @@ pub async fn handle_client(
                                         if let Some(client) = clients.get_mut(&user_id) {
                                             if let Some(last_pos) = &client.last_position {
                                                 let dist = analysis::calculate_distance(last_pos, &coords);
-                                                client.distance_history.push((dist, timestamp));
 
                                                 let mut state_changed = false;
                                                 if dist > 0.001 {
                                                     if client.state != UserState::InMovimento {
                                                         client.state = UserState::InMovimento;
-                                                        client.state_history.push((UserState::InMovimento, timestamp));
                                                         state_changed = true;
                                                     }
                                                     client.last_move_time = Some(timestamp);

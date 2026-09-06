@@ -33,7 +33,6 @@ pub async fn state_monitor_task(state: SharedState) {
                     if let Some(last_time) = client.last_move_time {
                         if now.signed_duration_since(last_time).num_minutes() >= 3 {
                             client.state = UserState::Fermo;
-                            client.state_history.push((UserState::Fermo, now));
                             to_update.push(user_id.clone());
                         }
                     }
