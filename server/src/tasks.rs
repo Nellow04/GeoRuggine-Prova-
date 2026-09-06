@@ -45,7 +45,9 @@ pub async fn state_monitor_task(state: SharedState) {
         // 2. Le scritture su disco nel database SQLite avvengono in background tramite spawn_blocking
         // SENZA trattenere il lock dei client e SENZA bloccare il worker thread di Tokio.
         for user_id in users_to_persist {
-            let _ = db::insert_state(&state.db_pool, &user_id, "Fermo", now).await;
+            if let Err(e) = db::insert_state(&state.db_pool, &user_id, "Fermo", now).await {
+                eprintln!("Errore DB salvataggio stato fermo per {}: {}", user_id, e);
+            }
         }
     }
 }
@@ -57,7 +59,13 @@ pub async fn state_monitor_task(state: SharedState) {
 /// Task periodico che registra ogni 2 minuti l'utilizzo della CPU del processo server in un file di log.
 pub async fn cpu_logger_task() {
     let mut sys = System::new();
-    let pid = get_current_pid().unwrap();
+    let pid = match get_current_pid() {
+        Ok(pid) => pid,
+        Err(e) => {
+            eprintln!("Errore recupero PID processo server: {}", e);
+            return;
+        }
+    };
 
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120));
 
@@ -75,19 +83,26 @@ pub async fn cpu_logger_task() {
             0.0
         };
 
-        if let Ok(mut file) = OpenOptions::new()
+        match OpenOptions::new()
             .create(true)
             .append(true)
             .open("cpu_log.txt")
             .await
         {
-            let log_line = format!(
-                "[{}] Server Process CPU Usage: {:.2}%\n",
-                Utc::now(),
-                cpu_usage
-            );
+            Ok(mut file) => {
+                let log_line = format!(
+                    "[{}] Server Process CPU Usage: {:.2}%\n",
+                    Utc::now(),
+                    cpu_usage
+                );
 
-            let _ = file.write_all(log_line.as_bytes()).await;
+                if let Err(e) = file.write_all(log_line.as_bytes()).await {
+                    eprintln!("Errore scrittura log CPU: {}", e);
+                }
+            }
+            Err(e) => {
+                eprintln!("Errore apertura log CPU: {}", e);
+            }
         }
     }
 }

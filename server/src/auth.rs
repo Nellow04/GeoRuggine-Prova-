@@ -1,26 +1,19 @@
-
-
 use argon2::{
-    Argon2,
-    PasswordHasher,
-    PasswordVerifier,
-    PasswordHash,
-    password_hash::{
-        SaltString,
-        rand_core::OsRng,
-    },
+    password_hash::{rand_core::OsRng, SaltString},
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
 };
+use std::error::Error;
+
+pub type AuthResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 /// Esegue l'hashing della password tramite Argon2 in modo asincrono.
-/// 
+///
 /// Argon2 è un algoritmo CPU-bound volutamente oneroso per prevenire attacchi a forza bruta.
 /// Viene delegato a `tokio::task::spawn_blocking` per non bloccare i worker thread di Tokio.
-pub async fn hash_password(
-    password: &str,
-) -> Result<String, argon2::password_hash::Error> {
+pub async fn hash_password(password: &str) -> AuthResult<String> {
     let password = password.to_string();
 
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> AuthResult<String> {
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
 
@@ -31,35 +24,31 @@ pub async fn hash_password(
 
         Ok(password_hash)
     })
-    .await
-    .expect("spawn_blocking for hash_password panicked")
+    .await?
 }
 
 /// Verifica la corrispondenza di una password con l'hash PHC memorizzato in modo asincrono.
-/// 
+///
 /// Anche la verifica è computazionalmente onerosa (CPU-bound) e viene quindi
 /// eseguita nel pool di thread bloccanti di Tokio.
-pub async fn verify_password(
-    password: &str,
-    stored_hash: &str,
-) -> bool {
+pub async fn verify_password(password: &str, stored_hash: &str) -> AuthResult<bool> {
     let password = password.to_string();
     let stored_hash = stored_hash.to_string();
 
-    tokio::task::spawn_blocking(move || {
-        let parsed_hash = match PasswordHash::new(&stored_hash) {
-            Ok(hash) => hash,
-            Err(_) => {
-                return false;
-            }
-        };
+    tokio::task::spawn_blocking(move || -> AuthResult<bool> {
+        let parsed_hash = PasswordHash::new(&stored_hash)?;
 
-        Argon2::default()
-            .verify_password(password.as_bytes(), &parsed_hash)
-            .is_ok()
+        match Argon2::default().verify_password(password.as_bytes(), &parsed_hash) {
+            Ok(()) => Ok(true),
+
+            // La password non corrisponde: errore normale dell'utente
+            Err(argon2::password_hash::Error::Password) => Ok(false),
+
+            // Qualsiasi altro errore è un errore interno
+            Err(e) => Err(Box::new(e)),
+        }
     })
-    .await
-    .expect("spawn_blocking for verify_password panicked")
+    .await?
 }
 
 #[cfg(test)]
@@ -70,13 +59,20 @@ mod tests {
     async fn test_async_hash_and_verify_success() {
         let password = "SuperSecretPassword123!";
         let hash = hash_password(password).await.expect("Hashing failed");
-        assert!(verify_password(password, &hash).await);
+        assert!(verify_password(password, &hash).await.unwrap());
     }
 
     #[tokio::test]
     async fn test_async_verify_wrong_password() {
         let password = "SuperSecretPassword123!";
         let hash = hash_password(password).await.expect("Hashing failed");
-        assert!(!verify_password("WrongPassword", &hash).await);
+        assert!(!verify_password("WrongPassword", &hash).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_malformed_hash_returns_error() {
+        let result = verify_password("password", "questo-non-e-un-hash-phc").await;
+
+        assert!(result.is_err());
     }
 }

@@ -1,4 +1,5 @@
 use chrono::{Datelike, TimeZone, Utc};
+use chrono_tz::Europe::Rome;
 use shared::{Message, UserState};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -82,15 +83,25 @@ async fn handle_private_message(text: &str, state: &SharedState) {
 
     // 2. Eseguiamo gli .await di rete e le query DB completamente all'esterno del lock!
     if let Some((target_uid, sender)) = target_info {
-        let _ = sender.send(direct_msg).await;
+        if let Err(e) = sender.send(direct_msg).await {
+            eprintln!("Errore invio messaggio privato a {}: {}", target_name, e);
+            return;
+        }
 
-        let _ = db::insert_chat(
+        if let Err(e) = db::insert_chat(
             &state.db_pool,
             "Server",
             Some(&target_uid),
             msg_content,
             Utc::now(),
-        ).await;
+        )
+        .await
+        {
+            eprintln!(
+                "Errore DB salvataggio messaggio privato per {}: {}",
+                target_name, e
+            );
+        }
 
         println!("Messaggio privato inviato a {}", target_name);
     } else {
@@ -119,7 +130,9 @@ async fn handle_broadcast(text: &str, state: &SharedState) {
     // 2. Inviamo a tutti i client senza trattenere alcun lock durante gli `.await`.
     // In questo modo, se un client ha il buffer pieno o è lento, non blocca l'intero server!
     for sender in senders {
-        let _ = sender.send(broadcast_msg.clone()).await;
+        if let Err(e) = sender.send(broadcast_msg.clone()).await {
+            eprintln!("Errore invio messaggio broadcast a un client: {}", e);
+        }
     }
 
     println!("Messaggio broadcast inviato a tutti");
@@ -133,25 +146,47 @@ pub fn calculate_interval_bounds(
     interval: &str,
     end_time: chrono::DateTime<Utc>,
 ) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
-    let start_time = match interval {
-        // Giorno corrente: da oggi alle ore 00:00:00 UTC a ora
-        "giorno" => Utc
-            .with_ymd_and_hms(end_time.year(), end_time.month(), end_time.day(), 0, 0, 0)
-            .unwrap(),
+    let end_time_rome = end_time.with_timezone(&Rome);
 
-        // Settimana corrente: da lunedì della settimana in corso alle ore 00:00:00 UTC a ora
+    let start_time = match interval {
+        // Giorno corrente: da oggi alle ore 00:00:00 Europe/Rome a ora
+        "giorno" => Rome
+            .with_ymd_and_hms(
+                end_time_rome.year(),
+                end_time_rome.month(),
+                end_time_rome.day(),
+                0,
+                0,
+                0,
+            )
+            .single()
+            .expect("midnight Europe/Rome must be a valid local time")
+            .with_timezone(&Utc),
+
+        // Settimana corrente: da lunedì della settimana in corso alle ore 00:00:00 Europe/Rome a ora
         "settimana" => {
-            let days_from_monday = end_time.weekday().num_days_from_monday();
-            let start_of_today = Utc
-                .with_ymd_and_hms(end_time.year(), end_time.month(), end_time.day(), 0, 0, 0)
-                .unwrap();
-            start_of_today - chrono::Duration::days(days_from_monday as i64)
+            let days_from_monday = end_time_rome.weekday().num_days_from_monday();
+            let start_date =
+                end_time_rome.date_naive() - chrono::Duration::days(days_from_monday as i64);
+            Rome.with_ymd_and_hms(
+                start_date.year(),
+                start_date.month(),
+                start_date.day(),
+                0,
+                0,
+                0,
+            )
+            .single()
+            .expect("midnight Europe/Rome must be a valid local time")
+            .with_timezone(&Utc)
         }
 
-        // Mese corrente: dal giorno 1 del mese alle ore 00:00:00 UTC a ora
-        "mese" => Utc
-            .with_ymd_and_hms(end_time.year(), end_time.month(), 1, 0, 0, 0)
-            .unwrap(),
+        // Mese corrente: dal giorno 1 del mese alle ore 00:00:00 Europe/Rome a ora
+        "mese" => Rome
+            .with_ymd_and_hms(end_time_rome.year(), end_time_rome.month(), 1, 0, 0, 0)
+            .single()
+            .expect("midnight Europe/Rome must be a valid local time")
+            .with_timezone(&Utc),
 
         // Tutto lo storico: dall'inizio dei tempi a ora
         _ => chrono::DateTime::<Utc>::MIN_UTC,
@@ -203,7 +238,10 @@ async fn handle_stats(text: &str, state: &SharedState) {
                             .unwrap_or("Disconnesso")
                     };
 
-                    println!("=== STATISTICHE: {} (Intervallo: {}) ===", target_name, interval);
+                    println!(
+                        "=== STATISTICHE: {} (Intervallo: {}) ===",
+                        target_name, interval
+                    );
                     let start_str = if start_time == chrono::DateTime::<Utc>::MIN_UTC {
                         "Inizio storico".to_string()
                     } else {
@@ -265,37 +303,35 @@ async fn handle_chat(text: &str, state: &SharedState) {
     // ZERO LOCK SU `clients`!
     // Le query al database accedono direttamente al db_pool in background tramite spawn_blocking.
     match db::get_user_by_name(&state.db_pool, target_name).await {
-        Ok(Some((uid, _))) => {
-            match db::get_chat_history(&state.db_pool, &uid).await {
-                Ok(chats) => {
-                    println!("=== STORICO CHAT con {} ===", target_name);
+        Ok(Some((uid, _))) => match db::get_chat_history(&state.db_pool, &uid).await {
+            Ok(chats) => {
+                println!("=== STORICO CHAT con {} ===", target_name);
 
-                    if chats.is_empty() {
-                        println!("(Nessun messaggio)");
-                    } else {
-                        for (sender, content, ts) in chats {
-                            let display_sender = if sender == "Server" {
-                                "Server"
-                            } else {
-                                target_name
-                            };
+                if chats.is_empty() {
+                    println!("(Nessun messaggio)");
+                } else {
+                    for (sender, content, ts) in chats {
+                        let display_sender = if sender == "Server" {
+                            "Server"
+                        } else {
+                            target_name
+                        };
 
-                            println!(
-                                "[{}] {}: {}",
-                                ts.format("%Y-%m-%d %H:%M:%S"),
-                                display_sender,
-                                content
-                            );
-                        }
+                        println!(
+                            "[{}] {}: {}",
+                            ts.format("%Y-%m-%d %H:%M:%S"),
+                            display_sender,
+                            content
+                        );
                     }
+                }
 
-                    println!("===============================");
-                }
-                Err(e) => {
-                    println!("Errore nel recupero chat: {}", e);
-                }
+                println!("===============================");
             }
-        }
+            Err(e) => {
+                println!("Errore nel recupero chat: {}", e);
+            }
+        },
         Ok(None) => {
             println!("Utente {} non trovato nel database.", target_name);
         }
@@ -325,41 +361,56 @@ mod tests {
 
     #[test]
     fn test_calculate_interval_bounds_giorno() {
-        // Venerdì 4 Settembre 2026 alle 19:15:30 UTC
+        // Venerdì 4 Settembre 2026 alle 19:15:30 UTC = 21:15:30 Europe/Rome
         let now = Utc.with_ymd_and_hms(2026, 9, 4, 19, 15, 30).unwrap();
         let (start, end) = calculate_interval_bounds("giorno", now);
 
-        assert_eq!(start, Utc.with_ymd_and_hms(2026, 9, 4, 0, 0, 0).unwrap());
+        assert_eq!(start, Utc.with_ymd_and_hms(2026, 9, 3, 22, 0, 0).unwrap());
         assert_eq!(end, now);
     }
 
     #[test]
     fn test_calculate_interval_bounds_settimana() {
-        // Venerdì 4 Settembre 2026 alle 19:15:30 UTC -> Lunedì era il 31 Agosto 2026
+        // Venerdì 4 Settembre 2026 alle 19:15:30 UTC -> Lunedì era il 31 Agosto 2026 Europe/Rome
         let now = Utc.with_ymd_and_hms(2026, 9, 4, 19, 15, 30).unwrap();
         let (start, end) = calculate_interval_bounds("settimana", now);
 
-        assert_eq!(start, Utc.with_ymd_and_hms(2026, 8, 31, 0, 0, 0).unwrap());
+        assert_eq!(start, Utc.with_ymd_and_hms(2026, 8, 30, 22, 0, 0).unwrap());
         assert_eq!(end, now);
 
-        // Domenica 6 Settembre 2026 -> Lunedì deve essere sempre il 31 Agosto 2026
+        // Domenica 6 Settembre 2026 UTC = Lunedì 7 Settembre Europe/Rome.
         let sunday = Utc.with_ymd_and_hms(2026, 9, 6, 23, 0, 0).unwrap();
         let (start_sun, _) = calculate_interval_bounds("settimana", sunday);
-        assert_eq!(start_sun, Utc.with_ymd_and_hms(2026, 8, 31, 0, 0, 0).unwrap());
+        assert_eq!(
+            start_sun,
+            Utc.with_ymd_and_hms(2026, 9, 6, 22, 0, 0).unwrap()
+        );
 
-        // Lunedì 31 Agosto 2026 alle 10:00 -> Lunedì 31 Agosto 00:00:00
+        // Lunedì 31 Agosto 2026 alle 10:00 UTC -> Lunedì 31 Agosto 00:00:00 Europe/Rome
         let monday = Utc.with_ymd_and_hms(2026, 8, 31, 10, 0, 0).unwrap();
         let (start_mon, _) = calculate_interval_bounds("settimana", monday);
-        assert_eq!(start_mon, Utc.with_ymd_and_hms(2026, 8, 31, 0, 0, 0).unwrap());
+        assert_eq!(
+            start_mon,
+            Utc.with_ymd_and_hms(2026, 8, 30, 22, 0, 0).unwrap()
+        );
     }
 
     #[test]
     fn test_calculate_interval_bounds_mese() {
-        // Venerdì 4 Settembre 2026 -> 1 Settembre 2026 00:00:00
+        // Venerdì 4 Settembre 2026 -> 1 Settembre 2026 00:00:00 Europe/Rome
         let now = Utc.with_ymd_and_hms(2026, 9, 4, 19, 15, 30).unwrap();
         let (start, end) = calculate_interval_bounds("mese", now);
 
-        assert_eq!(start, Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap());
+        assert_eq!(start, Utc.with_ymd_and_hms(2026, 8, 31, 22, 0, 0).unwrap());
+        assert_eq!(end, now);
+    }
+
+    #[test]
+    fn test_calculate_interval_bounds_rome_winter_offset() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 10, 12, 0, 0).unwrap();
+        let (start, end) = calculate_interval_bounds("giorno", now);
+
+        assert_eq!(start, Utc.with_ymd_and_hms(2026, 1, 9, 23, 0, 0).unwrap());
         assert_eq!(end, now);
     }
 

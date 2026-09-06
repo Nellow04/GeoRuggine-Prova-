@@ -1,14 +1,17 @@
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::Result as SqliteResult;
+use std::error::Error;
 
 pub type DbPool = Pool<SqliteConnectionManager>;
+pub type DbResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+pub type StateHistory = Vec<(shared::UserState, chrono::DateTime<chrono::Utc>)>;
+pub type DistanceHistory = Vec<(f64, chrono::DateTime<chrono::Utc>)>;
 
-pub fn init_db() -> SqliteResult<DbPool> {
+pub fn init_db() -> DbResult<DbPool> {
     let manager = SqliteConnectionManager::file("database.db");
-    let pool = Pool::new(manager).expect("Failed to create connection pool");
+    let pool = Pool::new(manager)?;
 
-    let conn = pool.get().expect("Failed to get connection from pool");
+    let conn = pool.get()?;
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS users (
@@ -53,34 +56,44 @@ pub fn init_db() -> SqliteResult<DbPool> {
     Ok(pool)
 }
 
-pub async fn register_user(pool: &DbPool, id: &str, username: &str, password_hash: &str) -> SqliteResult<bool> {
+pub async fn register_user(
+    pool: &DbPool,
+    id: &str,
+    username: &str,
+    password_hash: &str,
+) -> DbResult<bool> {
     let pool = pool.clone();
     let id = id.to_string();
     let username = username.to_string();
     let password_hash = password_hash.to_string();
 
-    tokio::task::spawn_blocking(move || {
-        let conn = pool.get().expect("Failed to get connection from pool");
+    tokio::task::spawn_blocking(move || -> DbResult<bool> {
+        let conn = pool.get()?;
         let result = conn.execute(
             "INSERT INTO users (id, username, password_hash) VALUES (?1, ?2, ?3)",
             rusqlite::params![id, username, password_hash],
         );
         match result {
             Ok(_) => Ok(true),
-            Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => Ok(false),
-            Err(e) => Err(e),
+
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+            {
+                Ok(false)
+            }
+
+            Err(e) => Err(Box::new(e)),
         }
     })
-    .await
-    .expect("spawn_blocking for register_user panicked")
+    .await?
 }
 
-pub async fn get_user_by_name(pool: &DbPool, username: &str) -> SqliteResult<Option<(String, String)>> {
+pub async fn get_user_by_name(pool: &DbPool, username: &str) -> DbResult<Option<(String, String)>> {
     let pool = pool.clone();
     let username = username.to_string();
 
-    tokio::task::spawn_blocking(move || {
-        let conn = pool.get().expect("Failed to get connection from pool");
+    tokio::task::spawn_blocking(move || -> DbResult<Option<(String, String)>> {
+        let conn = pool.get()?;
         let mut stmt = conn.prepare("SELECT id, password_hash FROM users WHERE username = ?1")?;
         let mut rows = stmt.query(rusqlite::params![username])?;
         if let Some(row) = rows.next()? {
@@ -91,84 +104,108 @@ pub async fn get_user_by_name(pool: &DbPool, username: &str) -> SqliteResult<Opt
             Ok(None)
         }
     })
-    .await
-    .expect("spawn_blocking for get_user_by_name panicked")
+    .await?
 }
 
-pub async fn insert_distance(pool: &DbPool, user_id: &str, distance: f64, timestamp: chrono::DateTime<chrono::Utc>) -> SqliteResult<()> {
+pub async fn insert_distance(
+    pool: &DbPool,
+    user_id: &str,
+    distance: f64,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> DbResult<()> {
     let pool = pool.clone();
     let user_id = user_id.to_string();
 
-    tokio::task::spawn_blocking(move || {
-        let conn = pool.get().expect("Failed to get connection from pool");
+    tokio::task::spawn_blocking(move || -> DbResult<()> {
+        let conn = pool.get()?;
         conn.execute(
             "INSERT INTO distances (user_id, distance, timestamp) VALUES (?1, ?2, ?3)",
             rusqlite::params![user_id, distance, timestamp.to_rfc3339()],
         )?;
         Ok(())
     })
-    .await
-    .expect("spawn_blocking for insert_distance panicked")
+    .await?
 }
 
-pub async fn insert_state(pool: &DbPool, user_id: &str, state: &str, timestamp: chrono::DateTime<chrono::Utc>) -> SqliteResult<()> {
+pub async fn insert_state(
+    pool: &DbPool,
+    user_id: &str,
+    state: &str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> DbResult<()> {
     let pool = pool.clone();
     let user_id = user_id.to_string();
     let state = state.to_string();
 
-    tokio::task::spawn_blocking(move || {
-        let conn = pool.get().expect("Failed to get connection from pool");
+    tokio::task::spawn_blocking(move || -> DbResult<()> {
+        let conn = pool.get()?;
         conn.execute(
             "INSERT INTO states (user_id, state, timestamp) VALUES (?1, ?2, ?3)",
             rusqlite::params![user_id, state, timestamp.to_rfc3339()],
         )?;
         Ok(())
     })
-    .await
-    .expect("spawn_blocking for insert_state panicked")
+    .await?
 }
 
-pub async fn insert_chat(pool: &DbPool, sender_id: &str, receiver_id: Option<&str>, content: &str, timestamp: chrono::DateTime<chrono::Utc>) -> SqliteResult<()> {
+pub async fn insert_chat(
+    pool: &DbPool,
+    sender_id: &str,
+    receiver_id: Option<&str>,
+    content: &str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> DbResult<()> {
     let pool = pool.clone();
     let sender_id = sender_id.to_string();
     let receiver_id = receiver_id.map(|s| s.to_string());
     let content = content.to_string();
 
-    tokio::task::spawn_blocking(move || {
-        let conn = pool.get().expect("Failed to get connection from pool");
+    tokio::task::spawn_blocking(move || -> DbResult<()> {
+        let conn = pool.get()?;
         conn.execute(
             "INSERT INTO chats (sender_id, receiver_id, content, timestamp) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![sender_id, receiver_id, content, timestamp.to_rfc3339()],
         )?;
         Ok(())
     })
-    .await
-    .expect("spawn_blocking for insert_chat panicked")
+    .await?
 }
 
 pub async fn get_user_history(
     pool: &DbPool,
     user_id: &str,
     start: chrono::DateTime<chrono::Utc>,
-    end: chrono::DateTime<chrono::Utc>
-) -> SqliteResult<(Vec<(shared::UserState, chrono::DateTime<chrono::Utc>)>, Vec<(f64, chrono::DateTime<chrono::Utc>)>)> {
+    end: chrono::DateTime<chrono::Utc>,
+) -> DbResult<(StateHistory, DistanceHistory)> {
     let pool = pool.clone();
     let user_id = user_id.to_string();
 
-    tokio::task::spawn_blocking(move || {
-        let conn = pool.get().expect("Failed to get connection from pool");
-        
+    tokio::task::spawn_blocking(move || -> DbResult<(StateHistory, DistanceHistory)> {
+        let conn = pool.get()?;
+
         let mut states = Vec::new();
         let mut stmt = conn.prepare("SELECT state, timestamp FROM states WHERE user_id = ?1 AND timestamp >= ?2 AND timestamp <= ?3 ORDER BY timestamp ASC")?;
         let mut rows = stmt.query(rusqlite::params![user_id, start.to_rfc3339(), end.to_rfc3339()])?;
         while let Some(row) = rows.next()? {
             let state_str: String = row.get(0)?;
             let ts_str: String = row.get(1)?;
-            let ts = chrono::DateTime::parse_from_rfc3339(&ts_str).unwrap().with_timezone(&chrono::Utc);
+            let ts = chrono::DateTime::parse_from_rfc3339(&ts_str)?.with_timezone(&chrono::Utc);
             let state = match state_str.as_str() {
                 "In Movimento" => shared::UserState::InMovimento,
-                "Disconnesso" | "Sconnesso" | "Disconnected" => shared::UserState::Disconnesso,
-                _ => shared::UserState::Fermo,
+
+                "Disconnesso" | "Sconnesso" | "Disconnected" => {
+                    shared::UserState::Disconnesso
+                }
+
+                "Fermo" => shared::UserState::Fermo,
+
+                unknown => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Stato non valido nel database: {}", unknown),
+                    )
+                        .into());
+                }
             };
             states.push((state, ts));
         }
@@ -185,11 +222,23 @@ pub async fn get_user_history(
             if let Some(row) = prior_rows.next()? {
                 let state_str: String = row.get(0)?;
                 let ts_str: String = row.get(1)?;
-                let ts = chrono::DateTime::parse_from_rfc3339(&ts_str).unwrap().with_timezone(&chrono::Utc);
+                let ts = chrono::DateTime::parse_from_rfc3339(&ts_str)?.with_timezone(&chrono::Utc);
                 let state = match state_str.as_str() {
                     "In Movimento" => shared::UserState::InMovimento,
-                    "Disconnesso" | "Sconnesso" | "Disconnected" => shared::UserState::Disconnesso,
-                    _ => shared::UserState::Fermo,
+
+                    "Disconnesso" | "Sconnesso" | "Disconnected" => {
+                        shared::UserState::Disconnesso
+                    }
+
+                    "Fermo" => shared::UserState::Fermo,
+
+                    unknown => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("Stato non valido nel database: {}", unknown),
+                        )
+                            .into());
+                    }
                 };
                 states.insert(0, (state, ts));
             }
@@ -201,44 +250,47 @@ pub async fn get_user_history(
         while let Some(row) = rows2.next()? {
             let dist: f64 = row.get(0)?;
             let ts_str: String = row.get(1)?;
-            let ts = chrono::DateTime::parse_from_rfc3339(&ts_str).unwrap().with_timezone(&chrono::Utc);
+            let ts = chrono::DateTime::parse_from_rfc3339(&ts_str)?.with_timezone(&chrono::Utc);
             distances.push((dist, ts));
         }
 
         Ok((states, distances))
     })
-    .await
-    .expect("spawn_blocking for get_user_history panicked")
+    .await?
 }
 
-pub async fn get_chat_history(pool: &DbPool, user_id: &str) -> SqliteResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
+pub async fn get_chat_history(
+    pool: &DbPool,
+    user_id: &str,
+) -> DbResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
     let pool = pool.clone();
     let user_id = user_id.to_string();
 
-    tokio::task::spawn_blocking(move || {
-        let conn = pool.get().expect("Failed to get connection from pool");
-        let mut chats = Vec::new();
-        // Prende i messaggi dove l'utente è mittente (e il ricevente è Server) o dove l'utente è ricevente (e il mittente è Server).
-        let mut stmt = conn.prepare(
-            "SELECT sender_id, content, timestamp FROM chats 
+    tokio::task::spawn_blocking(
+        move || -> DbResult<Vec<(String, String, chrono::DateTime<chrono::Utc>)>> {
+            let conn = pool.get()?;
+            let mut chats = Vec::new();
+            // Prende i messaggi dove l'utente è mittente (e il ricevente è Server) o dove l'utente è ricevente (e il mittente è Server).
+            let mut stmt = conn.prepare(
+                "SELECT sender_id, content, timestamp FROM chats
              WHERE (sender_id = ?1 AND receiver_id = 'Server') 
                 OR (sender_id = 'Server' AND receiver_id = ?1) 
-             ORDER BY timestamp ASC"
-        )?;
-        
-        let mut rows = stmt.query(rusqlite::params![user_id])?;
-        while let Some(row) = rows.next()? {
-            let sender: String = row.get(0)?;
-            let content: String = row.get(1)?;
-            let ts_str: String = row.get(2)?;
-            let ts = chrono::DateTime::parse_from_rfc3339(&ts_str).unwrap().with_timezone(&chrono::Utc);
-            chats.push((sender, content, ts));
-        }
-        
-        Ok(chats)
-    })
-    .await
-    .expect("spawn_blocking for get_chat_history panicked")
+             ORDER BY timestamp ASC",
+            )?;
+
+            let mut rows = stmt.query(rusqlite::params![user_id])?;
+            while let Some(row) = rows.next()? {
+                let sender: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                let ts_str: String = row.get(2)?;
+                let ts = chrono::DateTime::parse_from_rfc3339(&ts_str)?.with_timezone(&chrono::Utc);
+                chats.push((sender, content, ts));
+            }
+
+            Ok(chats)
+        },
+    )
+    .await?
 }
 
 #[cfg(test)]
@@ -260,7 +312,8 @@ mod tests {
                 password_hash TEXT NOT NULL
             )",
             (),
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "CREATE TABLE IF NOT EXISTS states (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -269,7 +322,8 @@ mod tests {
                 timestamp DATETIME NOT NULL
             )",
             (),
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "CREATE TABLE IF NOT EXISTS distances (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -278,7 +332,8 @@ mod tests {
                 timestamp DATETIME NOT NULL
             )",
             (),
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "CREATE TABLE IF NOT EXISTS chats (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -288,7 +343,8 @@ mod tests {
                 timestamp DATETIME NOT NULL
             )",
             (),
-        ).unwrap();
+        )
+        .unwrap();
 
         pool
     }
@@ -297,10 +353,14 @@ mod tests {
     async fn test_async_register_and_get_user() {
         let pool = init_test_pool();
 
-        let ok = register_user(&pool, "u1", "testuser", "hashedpass").await.unwrap();
+        let ok = register_user(&pool, "u1", "testuser", "hashedpass")
+            .await
+            .unwrap();
         assert!(ok);
 
-        let duplicate = register_user(&pool, "u2", "testuser", "hashedpass2").await.unwrap();
+        let duplicate = register_user(&pool, "u2", "testuser", "hashedpass2")
+            .await
+            .unwrap();
         assert!(!duplicate);
 
         let fetched = get_user_by_name(&pool, "testuser").await.unwrap();
@@ -315,7 +375,9 @@ mod tests {
         let pool = init_test_pool();
         let now = chrono::Utc::now();
 
-        insert_state(&pool, "u1", "In Movimento", now).await.unwrap();
+        insert_state(&pool, "u1", "In Movimento", now)
+            .await
+            .unwrap();
         insert_distance(&pool, "u1", 1.5, now).await.unwrap();
 
         let start = now - chrono::Duration::minutes(5);
@@ -332,12 +394,69 @@ mod tests {
         let pool = init_test_pool();
         let now = chrono::Utc::now();
 
-        insert_chat(&pool, "u1", Some("Server"), "Ciao Server!", now).await.unwrap();
-        insert_chat(&pool, "Server", Some("u1"), "Ciao Utente!", now + chrono::Duration::seconds(1)).await.unwrap();
+        insert_chat(&pool, "u1", Some("Server"), "Ciao Server!", now)
+            .await
+            .unwrap();
+        insert_chat(
+            &pool,
+            "Server",
+            Some("u1"),
+            "Ciao Utente!",
+            now + chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
 
         let history = get_chat_history(&pool, "u1").await.unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].1, "Ciao Server!");
         assert_eq!(history[1].1, "Ciao Utente!");
+    }
+
+    #[tokio::test]
+    async fn test_history_includes_state_before_start() {
+        let pool = init_test_pool();
+
+        let start = chrono::Utc::now();
+
+        let before = start - chrono::Duration::hours(1);
+
+        let after = start + chrono::Duration::minutes(30);
+
+        insert_state(&pool, "u1", "In Movimento", before)
+            .await
+            .unwrap();
+
+        insert_state(&pool, "u1", "Fermo", after).await.unwrap();
+
+        let (states, _) = get_user_history(&pool, "u1", start, start + chrono::Duration::hours(1))
+            .await
+            .unwrap();
+
+        assert_eq!(states.len(), 2);
+
+        assert_eq!(states[0].0, shared::UserState::InMovimento);
+
+        assert_eq!(states[0].1, before);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_state_returns_error() {
+        let pool = init_test_pool();
+        let now = chrono::Utc::now();
+
+        insert_state(&pool, "u1", "StatoInesistente", now)
+            .await
+            .unwrap();
+
+        let result = get_user_history(
+            &pool,
+            "u1",
+            now - chrono::Duration::minutes(1),
+            now + chrono::Duration::minutes(1),
+        )
+        .await;
+
+        assert!(result.is_err());
     }
 }

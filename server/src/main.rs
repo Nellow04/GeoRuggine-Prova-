@@ -14,26 +14,21 @@ use tokio::sync::RwLock;
 
 use db::init_db;
 
-use state::{
-    ServerState,
-    SharedState,
-};
-
+use state::{ServerState, SharedState};
 
 #[tokio::main]
-async fn main()
-    -> Result<(), Box<dyn std::error::Error>>
-{
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // ========================================================
     // DATABASE
     // ========================================================
 
-    let db_pool =
-        init_db()
-            .expect(
-                "Impossibile inizializzare il database"
-            );
-
+    let db_pool = match init_db() {
+        Ok(pool) => pool,
+        Err(e) => {
+            eprintln!("Impossibile inizializzare il database: {}", e);
+            return Err(e);
+        }
+    };
 
     // ========================================================
     // STATO SERVER
@@ -46,52 +41,33 @@ async fn main()
 
     let state: SharedState = Arc::new(state_data);
 
-
     // ========================================================
     // SERVER TCP
     // ========================================================
 
-    let listener =
-        TcpListener::bind(
-            "127.0.0.1:8080"
-        )
-            .await?;
+    let listener = TcpListener::bind("127.0.0.1:8080").await?;
 
-
-    println!(
-        "Server in ascolto su 127.0.0.1:8080"
-    );
-
+    println!("Server in ascolto su 127.0.0.1:8080");
 
     // ========================================================
     // TASK MONITORAGGIO STATO
     // ========================================================
 
-    let state_for_monitor =
-        state.clone();
+    let state_for_monitor = state.clone();
 
     tokio::spawn(async move {
-        tasks::state_monitor_task(
-            state_for_monitor
-        )
-            .await;
+        tasks::state_monitor_task(state_for_monitor).await;
     });
-
 
     // ========================================================
     // CLI SERVER
     // ========================================================
 
-    let state_for_commands =
-        state.clone();
+    let state_for_commands = state.clone();
 
     tokio::spawn(async move {
-        cli::command_loop(
-            state_for_commands
-        )
-            .await;
+        cli::command_loop(state_for_commands).await;
     });
-
 
     // ========================================================
     // LOGGER CPU
@@ -101,33 +77,18 @@ async fn main()
         tasks::cpu_logger_task().await;
     });
 
-
     // ========================================================
     // ACCETTAZIONE CLIENT
     // ========================================================
 
     loop {
-        let (socket, _) =
-            listener.accept().await?;
+        let (socket, _) = listener.accept().await?;
 
-
-        let state_for_client =
-            state.clone();
-
+        let state_for_client = state.clone();
 
         tokio::spawn(async move {
-
-            if let Err(e) =
-                connection::handle_client(
-                    socket,
-                    state_for_client,
-                )
-                    .await
-            {
-                eprintln!(
-                    "Errore gestione client: {}",
-                    e
-                );
+            if let Err(e) = connection::handle_client(socket, state_for_client).await {
+                eprintln!("Errore gestione client: {}", e);
             }
         });
     }
