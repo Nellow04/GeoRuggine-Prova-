@@ -245,12 +245,21 @@ async fn handle_stats(text: &str, state: &SharedState) {
                     let start_str = if start_time == chrono::DateTime::<Utc>::MIN_UTC {
                         "Inizio storico".to_string()
                     } else {
-                        start_time.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+                        start_time
+                            .with_timezone(&Rome)
+                            .format("%Y-%m-%d %H:%M:%S %Z")
+                            .to_string()
                     };
+
+                    let end_str = end_time
+                        .with_timezone(&Rome)
+                        .format("%Y-%m-%d %H:%M:%S %Z")
+                        .to_string();
+
                     println!(
                         "Periodo: da {} a {}",
                         start_str,
-                        end_time.format("%Y-%m-%d %H:%M:%S UTC")
+                        end_str
                     );
                     println!("Stato Attuale: {}", state_str);
                     println!("Distanza Totale: {:.2} km", result.total_distance_km);
